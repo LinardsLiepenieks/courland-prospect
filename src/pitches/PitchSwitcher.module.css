@@ -1,0 +1,173 @@
+.root {
+  position: relative;
+  display: inline-block;
+}
+
+/* ── Trigger ─────────────────────────────────────────────── */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 7px 10px 7px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 550;
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.trigger:hover {
+  border-color: var(--text-faint);
+}
+
+.trigger:active {
+  transform: scale(0.98);
+}
+
+.trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.triggerLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triggerLabel[data-placeholder="true"] {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 200ms var(--ease-out);
+}
+
+.chevron[data-open="true"] {
+  transform: rotate(180deg);
+}
+
+/* ── Menu ────────────────────────────────────────────────── */
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  max-width: 320px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  /* Origin-aware: scales down from the trigger it hangs off, not center. */
+  transform-origin: top left;
+  animation: menuIn 160ms var(--ease-out);
+}
+
+@keyframes menuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item,
+.createItem {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text);
+  text-align: left;
+  transition: background-color 120ms var(--ease-out);
+}
+
+.item {
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text);
+}
+
+.item:hover,
+.createItem:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.item:focus-visible,
+.createItem:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.item[data-active="true"] {
+  color: var(--accent);
+  font-weight: 550;
+}
+
+.item[data-active="true"] svg {
+  color: var(--accent);
+}
+
+.itemName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--border);
+}
+
+.createItem {
+  gap: 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.createItem:hover {
+  color: var(--text);
+}
+
+.createItem svg {
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu {
+    animation: none;
+  }
+  .chevron {
+    transition: none;
+  }
+  .trigger:active {
+    transform: none;
+  }
+}

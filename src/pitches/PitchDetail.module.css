@@ -1,0 +1,54 @@
+/* ── Detail ──────────────────────────────────────────────── */
+.detail {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+.name {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.field {
+  margin-top: 24px;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.skill {
+  margin: 8px 0 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skillEmpty {
+  margin: 8px 0 0;
+  font-size: 15px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.meta {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .detail {
+    animation: none;
+  }
+}

@@ -1,0 +1,185 @@
+.edit {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* ── Form (field styles composed from the shared form module) ─ */
+.form {
+  composes: form from "../styles/form.module.css";
+}
+
+.fieldLabel {
+  composes: fieldLabel from "../styles/form.module.css";
+}
+
+.input {
+  composes: input from "../styles/form.module.css";
+}
+
+.textarea {
+  composes: textarea from "../styles/form.module.css";
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+  pointer-events: none;
+}
+
+.saved[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.saved svg {
+  color: var(--accent);
+}
+
+.primaryBtn {
+  padding: 10px 18px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.primaryBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.primaryBtn:disabled {
+  opacity: 0.5;
+}
+
+/* ── Danger zone ─────────────────────────────────────────── */
+.danger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 40px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border));
+  border-radius: 12px;
+}
+
+.dangerTitle {
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.dangerBody {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.confirm {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.deleteTrigger,
+.deleteBtn,
+.secondaryBtn {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.deleteTrigger:active:not(:disabled),
+.deleteBtn:active:not(:disabled),
+.secondaryBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.deleteTrigger:disabled,
+.deleteBtn:disabled,
+.secondaryBtn:disabled {
+  opacity: 0.5;
+}
+
+/* Outlined destructive trigger — quiet until intent is shown. */
+.deleteTrigger {
+  color: var(--danger);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.deleteTrigger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* Solid destructive confirm. */
+.deleteBtn {
+  color: #fff;
+  background: var(--danger);
+  border: 1px solid transparent;
+}
+
+.deleteBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, #000);
+}
+
+.secondaryBtn {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.secondaryBtn:hover:not(:disabled) {
+  border-color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .edit {
+    animation: none;
+  }
+  .saved {
+    transition: opacity 200ms var(--ease-out);
+    transform: none;
+  }
+  .primaryBtn:active:not(:disabled),
+  .deleteTrigger:active:not(:disabled),
+  .deleteBtn:active:not(:disabled),
+  .secondaryBtn:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -1,0 +1,68 @@
+/* Shared form-field primitives, composed into feature form modules so the
+   input/label/error styling stays defined once. */
+
+.form {
+  display: flex;
+  flex-direction: column;
+}
+
+.fieldLabel {
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.fieldLabel:not(:first-of-type) {
+  margin-top: 20px;
+}
+
+/* Base shared by inputs and textareas. */
+.control {
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  font-size: 14px;
+  outline: none;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.control::placeholder {
+  color: var(--text-faint);
+}
+
+.control:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.control:disabled {
+  opacity: 0.6;
+}
+
+.input {
+  composes: control;
+}
+
+.textarea {
+  composes: control;
+  min-height: 120px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.error {
+  margin-top: 16px;
+  padding: 9px 12px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}

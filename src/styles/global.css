@@ -1,0 +1,87 @@
+:root {
+  /* Motion — crisp, professional. Custom curve (built-ins lack punch). */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* Light theme */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --border: #ececec;
+  --border-strong: #dcdcdc;
+  --text: #18181b;
+  --text-muted: #71717a;
+  --text-faint: #a1a1aa;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-contrast: #ffffff;
+  --danger: #dc2626;
+  --shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.06);
+  --shadow-md: 0 4px 16px rgba(24, 24, 27, 0.08);
+
+  /* Focus ring shared by all inputs/triggers. */
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0c0d;
+    --surface: #161618;
+    --border: #262629;
+    --border-strong: #35353a;
+    --text: #f4f4f5;
+    --text-muted: #a1a1aa;
+    --text-faint: #71717a;
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --accent-contrast: #0c0c0d;
+    --danger: #f87171;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font-family: inherit;
+  cursor: default;
+}
+
+input,
+textarea {
+  font-family: inherit;
+}
+
+/* Shared entrance: fade up a few px. Referenced from CSS modules (global
+   keyframe names aren't scoped, so modules can use it directly). */
+@keyframes enterUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
