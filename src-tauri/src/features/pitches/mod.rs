@@ -12,4 +12,6 @@
 
 pub mod commands;
 mod model;
-mod repository;
+// `pub(crate)` (not private) because the ingest HTTP server in `crate::ingest`
+// serves the pitch list to the extension's dropdown by calling `repository::list`.
+pub(crate) mod repository;
