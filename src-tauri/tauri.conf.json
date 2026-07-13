@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm --prefix chrome-extension ci && npm --prefix chrome-extension run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -15,17 +15,20 @@
         "title": "Courland Prospect",
         "width": 800,
         "height": 600,
-        "x": 100,
-        "y": 1180
+        "center": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../chrome-extension/dist/": "extension/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -24,3 +24,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 
+# --- Ingest infra: loopback HTTP server (see src/ingest) ---
+# axum runs on Tauri's existing tokio runtime (no second runtime is spawned).
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"] }
+# Random shared token for the loopback server.
+rand = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+# Fallback Chrome path discovery via the App Paths registry key.
+winreg = "0.52"
+
