@@ -12,12 +12,12 @@ import {
   inboxTopBar,
 } from "./linkedin";
 import { buildWidget } from "./widget";
-import { buildDraftControl, parseDraftHash, runDraftMode } from "./draft";
+import { buildDraftControl, isFillTab, runFillMode } from "./draft";
 
-// If this tab was opened by a "Draft for" batch, it carries the pitch + target
-// conversation index in its URL hash. Captured once at load (before we clear the
+// If this tab was opened by the review-tab queue, it carries the `#cpfill` marker
+// so it can pre-fill the cached draft. Captured once at load (before we clear the
 // hash below) so the injection guard can see it even after it's stripped.
-const draftTarget = parseDraftHash();
+const fillTab = isFillTab();
 
 function inject(): void {
   injectComposeWidgets();
@@ -52,8 +52,8 @@ function injectComposeWidgets(): void {
 // inside one of the header's buttons. Guarded document-wide (one control per
 // page) so the MutationObserver's re-runs don't stack copies.
 function injectDraftControl(): void {
-  // A background draft tab shouldn't sprout its own "Draft for" control.
-  if (draftTarget) return;
+  // A review tab (opened to pre-fill a draft) shouldn't sprout its own control.
+  if (fillTab) return;
   if (document.querySelector(".cp-draft-control")) return;
   const anchor = inboxFilterRow() ?? inboxTopBar();
   if (!anchor) return;
@@ -124,13 +124,13 @@ checkin();
 
 schedule();
 
-// Draft mode: this tab was opened by a "Draft for [N]" batch (tagged via the URL
-// hash) on the messaging inbox. Clear the hash first — so an SPA re-render or a
-// manual refresh can't re-trigger drafting — then open this tab's assigned
-// conversation (by list position) and draft into it.
-if (draftTarget) {
+// Fill mode: this tab was opened by the review-tab queue (tagged via the `#cpfill`
+// hash) straight on a thread URL. Clear the hash first — so an SPA re-render or a
+// manual refresh can't re-trigger the fill — then paste the cached draft for this
+// conversation into its composer once the tab is foregrounded.
+if (fillTab) {
   history.replaceState(null, "", location.pathname + location.search);
-  void runDraftMode(draftTarget.pitchId, draftTarget.index, draftTarget.filter).catch(() => {
-    // runDraftMode already surfaces failures via a toast; never propagate.
+  void runFillMode().catch(() => {
+    // runFillMode already surfaces failures via a toast; never propagate.
   });
 }

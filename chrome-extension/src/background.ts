@@ -2,7 +2,12 @@
 // happen. The content script messages us; we attach the token and call the app.
 
 import { baseUrl, getConfig, invalidateConfig } from "./lib/config";
-import { nudgeDraftQueue, releaseSlot, startDraftBatch } from "./lib/draftQueue";
+import {
+  enqueueReviewTab,
+  nudgeReviewQueue,
+  releaseReviewSlot,
+  resetReviewQueue,
+} from "./lib/reviewQueue";
 import { drain, enqueue, remove } from "./lib/outbox";
 import type { CaptureOutcome, OutboxItem, Request, Response } from "./lib/types";
 
@@ -86,10 +91,10 @@ chrome.runtime.onInstalled.addListener(wake);
 chrome.runtime.onStartup.addListener(wake);
 chrome.alarms.onAlarm.addListener((alarm) => {
   // ping() hits /health (the heartbeat the gate reads) then drains the outbox.
-  // nudgeDraftQueue() is the backstop that reopens a stalled draft batch.
+  // nudgeReviewQueue() is the backstop that reopens a stalled review-tab batch.
   if (alarm.name === DRAIN_ALARM) {
     void ping();
-    void nudgeDraftQueue();
+    void nudgeReviewQueue();
   }
 });
 
@@ -115,28 +120,30 @@ async function handle(msg: Request): Promise<Response<unknown>> {
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       return { ok: true, data: await res.json() };
     }
-    if (msg.type === "openThreads") {
-      // Queue `count` background tabs on the messaging inbox, each tagged (via the
-      // URL hash) with the pitch + its target conversation index. The batch counts
-      // down from the selected conversation, so the indices run `start … start +
-      // count - 1`. Each tab opens that conversation itself (LinkedIn's list rows
-      // carry no thread URL to hand off) and drafts. Content scripts can't open
-      // tabs (popup-blocked); the SW can, with no extra permission for tabs.create.
-      // The queue caps how many load at once — LinkedIn soft-throttles a burst of
-      // parallel tab loads — opening the rest as each reports done (draftSlotFree).
-      const { pitchId, count, start, filter } = msg.payload;
-      const opened = await startDraftBatch(pitchId, filter, start, count);
-      return { ok: true, data: { opened } };
-    }
     if (msg.type === "draftReply") {
       const res = await call("/draft", { method: "POST", body: JSON.stringify(msg.payload) });
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       return { ok: true, data: await res.json() };
     }
-    if (msg.type === "draftSlotFree") {
-      // A draft tab finished its heavy load+generate phase — open the next queued
+    if (msg.type === "resetReviewQueue") {
+      // The inbox tab is starting a fresh drafting cycle — clear any leftover
+      // review-tab queue state so the new run starts with all slots free.
+      await resetReviewQueue();
+      return { ok: true, data: null };
+    }
+    if (msg.type === "openReviewTab") {
+      // One conversation's draft is ready and cached — open a pre-filled review tab
+      // for it (content scripts can't open tabs; the SW can, no extra permission
+      // for tabs.create). The queue caps how many load at once — LinkedIn
+      // soft-throttles a burst of parallel tab loads — opening the rest as each
+      // reports it loaded (reviewTabFilled).
+      await enqueueReviewTab(msg.payload.url);
+      return { ok: true, data: null };
+    }
+    if (msg.type === "reviewTabFilled") {
+      // A review tab finished loading and read its draft — open the next queued
       // tab. Fire-and-forget; the tab ignores the response.
-      void releaseSlot();
+      void releaseReviewSlot();
       return { ok: true, data: null };
     }
     // queueMessages — durably queue first (so a closed app never loses a

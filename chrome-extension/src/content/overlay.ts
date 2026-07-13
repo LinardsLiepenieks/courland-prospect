@@ -1,16 +1,17 @@
-// A full-screen "Drafting reply…" overlay shown in a background draft tab while
-// it opens its assigned conversation and the AI reply is generated. Purely a
-// status surface: it masks LinkedIn's list→thread churn and blocks stray clicks
-// on a tab that's mid-work, then lifts the moment the draft starts typing in.
+// A full-screen "Draft ready…" overlay shown in a review tab while LinkedIn's
+// list→thread view comes up. Purely a status surface: it masks the load/render
+// churn and blocks stray clicks on a tab that isn't ready yet, then lifts the
+// moment the pre-made draft is pasted in. The draft was generated during the
+// inbox cycle, so nothing is generated here — this only covers the load.
 // Self-contained (mirrors toast.ts); failures never propagate into the page.
 
 import "./overlay.css";
 
 const OVERLAY_ID = "cp-draft-overlay";
 
-/** Show the full-screen "Drafting reply…" overlay. Idempotent — a second call
- *  while it's up is a no-op. Enters on the next frames (from the CSS hidden
- *  state) so the fade has something to animate from. */
+/** Show the full-screen "Draft ready…" status overlay. Idempotent — a second call
+ *  while it's up is a no-op. Enters on the next frames (from the CSS hidden state)
+ *  so the fade has something to animate from. */
 export function showDraftOverlay(): void {
   try {
     if (document.getElementById(OVERLAY_ID)) return;
@@ -21,16 +22,16 @@ export function showDraftOverlay(): void {
     overlay.className = "cp-draft-overlay";
     overlay.setAttribute("role", "status");
     overlay.setAttribute("aria-live", "polite");
-    overlay.setAttribute("aria-label", "Drafting reply");
+    overlay.setAttribute("aria-label", "Draft ready");
 
     const card = document.createElement("div");
     card.className = "cp-draft-overlay__card";
     const spinner = document.createElement("div");
     spinner.className = "cp-draft-overlay__spinner";
-    const label = document.createElement("div");
-    label.className = "cp-draft-overlay__label";
-    label.textContent = "Drafting reply…";
-    card.append(spinner, label);
+    const labelEl = document.createElement("div");
+    labelEl.className = "cp-draft-overlay__label";
+    labelEl.textContent = "Draft ready…";
+    card.append(spinner, labelEl);
     overlay.append(card);
     host.append(overlay);
 

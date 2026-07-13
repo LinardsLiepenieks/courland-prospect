@@ -52,20 +52,13 @@ export interface QueueMessagesPayload {
   messages: CapturedMessage[];
 }
 
-/** Ask the SW to open `count` background tabs on the messaging inbox, each tagged
- *  (via a URL hash) with the chosen pitch and its target conversation index, so
- *  each tab opens that conversation itself and drafts a reply. LinkedIn's list
- *  rows have no thread URL to hand off, so the tab identifies its conversation by
- *  list position rather than by URL. `start` is the list index of the currently-
- *  selected conversation: the batch drafts for it and the `count - 1` below it, so
- *  the tabs cover absolute indices `start … start + count - 1`. `filter` is the
- *  active inbox filter pill token (e.g. `"UNREAD"`) to re-apply in each tab so its
- *  list positions match the filtered view, or `null` for the default inbox. */
-export interface OpenThreadsPayload {
-  pitchId: number;
-  count: number;
-  start: number;
-  filter: string | null;
+/** Ask the SW to open one conversation as a pre-filled "review" tab. The main
+ *  inbox tab has already generated this thread's draft and cached it (keyed by
+ *  `url`); the SW navigates a background tab straight to `url`, where the content
+ *  script reads the cached draft and pastes it. `url` is the normalized thread URL
+ *  (`https://www.linkedin.com/messaging/thread/<id>/`) captured during the cycle. */
+export interface OpenReviewTabPayload {
+  url: string;
 }
 
 /** One prior message in a thread, as the drafter scrapes it — the minimal shape
@@ -119,9 +112,10 @@ export type Request =
   | { type: "listPitches" }
   | { type: "addProspect"; payload: NewProspect }
   | { type: "queueMessages"; payload: QueueMessagesPayload }
-  | { type: "openThreads"; payload: OpenThreadsPayload }
   | { type: "draftReply"; payload: DraftReplyPayload }
-  | { type: "draftSlotFree" };
+  | { type: "resetReviewQueue" }
+  | { type: "openReviewTab"; payload: OpenReviewTabPayload }
+  | { type: "reviewTabFilled" };
 
 export type Response<T> =
   | { ok: true; data: T }

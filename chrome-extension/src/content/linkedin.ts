@@ -375,59 +375,6 @@ export function inboxFilterRow(): HTMLElement | null {
   );
 }
 
-// ── Inbox filter pills ────────────────────────────────────────────────────────
-// The single-select pill row (Jobs / Unread / Connections / InMail / Starred) in
-// the messaging header. Each pill carries a stable
-// `data-test-messaging-inbox-filters__filter-pill="<TOKEN>"` and marks its
-// selected state with `aria-pressed="true"` (and `aria-checked="true"`). A batch
-// reads which pill is active in the foreground and re-applies it in each draft tab,
-// so a filtered view's
-// list positions line up with the tab's list.
-
-/** The stable per-pill token attribute (e.g. value "UNREAD"). */
-const FILTER_PILL_ATTR = "data-test-messaging-inbox-filters__filter-pill";
-const FILTER_PILL_GROUP = "[data-test-messaging-inbox-filters__filter-pill-group]";
-
-/** The single-select pill row container, or null when the header isn't rendered. */
-function filterPillGroup(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(FILTER_PILL_GROUP);
-}
-
-/** Whether a filter pill is the currently-selected one. LinkedIn marks it with
- *  `aria-pressed="true"` (and `aria-checked="true"`); either counts. */
-export function isInboxFilterActive(pill: HTMLElement): boolean {
-  return pill.getAttribute("aria-pressed") === "true" || pill.getAttribute("aria-checked") === "true";
-}
-
-/** The token of the inbox filter pill currently active (e.g. `"UNREAD"`), or
- *  `null` when none is selected (the default, unfiltered inbox). Read in the
- *  foreground at click time so a batch can carry the same filter into its tabs. */
-export function activeInboxFilter(): string | null {
-  const group = filterPillGroup();
-  if (!group) return null;
-  for (const pill of Array.from(group.querySelectorAll<HTMLElement>(`[${FILTER_PILL_ATTR}]`))) {
-    if (isInboxFilterActive(pill)) return pill.getAttribute(FILTER_PILL_ATTR);
-  }
-  return null;
-}
-
-/** The filter pill button for a token (e.g. `"UNREAD"`), or `null` if the pill
- *  row isn't rendered yet / the token isn't offered. `token` is caller-sanitized
- *  to `[A-Z_]+` before it reaches this attribute selector. */
-export function inboxFilterPill(token: string): HTMLElement | null {
-  return filterPillGroup()?.querySelector<HTMLElement>(`[${FILTER_PILL_ATTR}="${token}"]`) ?? null;
-}
-
-/** Select a filter pill by clicking it. Fail-quiet (a detached node just no-ops),
- *  keeping every LinkedIn DOM write inside this module. */
-export function clickFilterPill(pill: HTMLElement): void {
-  try {
-    pill.click();
-  } catch {
-    // Never propagate into the host page.
-  }
-}
-
 /** Whether a thread's composer already holds user-entered text — so the drafter
  *  can skip it rather than overwrite a hand-typed unsent reply (LinkedIn restores
  *  a per-conversation draft into the box when you open the thread). Reads the same

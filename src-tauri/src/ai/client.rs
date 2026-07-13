@@ -15,11 +15,13 @@ use tokio::sync::Semaphore;
 
 use super::prompt::Prompt;
 
-/// Ceiling on how many `claude` processes run at once across the whole app. Batch
-/// drafting fires one request per opened thread tab (up to 50), so without a cap
-/// dozens of concurrent CLI processes would thrash the machine and trip API rate
-/// limits. Four balances throughput against load; the rest queue on the permit.
-const MAX_CONCURRENT: usize = 4;
+/// Ceiling on how many `claude` processes run at once across the whole app. A
+/// batch draft cycle fires one request per scraped conversation (up to 50) in
+/// quick succession, so without a cap dozens of concurrent CLI processes would
+/// thrash the machine and trip API rate limits. Seven balances throughput against
+/// load — generation is the batch's bottleneck, so this paces the whole pipeline;
+/// the rest queue on the permit.
+const MAX_CONCURRENT: usize = 7;
 
 fn limiter() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
