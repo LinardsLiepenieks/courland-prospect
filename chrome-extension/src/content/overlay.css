@@ -1,0 +1,89 @@
+/* Full-screen "drafting…" overlay for background draft tabs. A frosted backdrop
+   (masks LinkedIn's list→thread churn while the reply generates) with a centered
+   card + spinner. Fade/scale entrance, custom ease-out, GPU-only transform/opacity
+   (see design skill). Sits just below the toaster so any toast reads on top. */
+
+.cp-draft-overlay {
+  --cp-accent: #c11b36; /* Courland crimson */
+  --cp-ease: cubic-bezier(0.23, 1, 0.32, 1);
+
+  position: fixed;
+  inset: 0;
+  z-index: 2147482000; /* below the toaster (2147483000) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(247, 248, 250, 0.72);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+
+  /* Base = hidden state, so the fade has something to animate from. */
+  opacity: 0;
+  transition: opacity 200ms var(--cp-ease);
+}
+
+.cp-draft-overlay[data-enter="true"] {
+  opacity: 1;
+}
+
+.cp-draft-overlay__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 28px 40px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.16);
+
+  /* Settle in from just under full size — never from scale(0). */
+  transform: scale(0.96);
+  transition: transform 200ms var(--cp-ease);
+}
+
+.cp-draft-overlay[data-enter="true"] .cp-draft-overlay__card {
+  transform: scale(1);
+}
+
+.cp-draft-overlay__spinner {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid rgba(193, 27, 54, 0.18);
+  border-top-color: var(--cp-accent);
+  /* Constant motion → linear; fast (0.7s) so it reads as responsive. */
+  animation: cp-draft-spin 0.7s linear infinite;
+}
+
+.cp-draft-overlay__label {
+  font:
+    600 14px/1.3 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  color: #3d4b5c;
+  letter-spacing: 0.01em;
+}
+
+@keyframes cp-draft-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion: drop the fade/scale entrance; keep the spinner (it's the load
+   signal) but slow it so it's gentler. */
+@media (prefers-reduced-motion: reduce) {
+  .cp-draft-overlay {
+    transition: opacity 120ms ease;
+  }
+  .cp-draft-overlay__card {
+    transform: none;
+    transition: none;
+  }
+  .cp-draft-overlay__spinner {
+    animation-duration: 1.4s;
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "courland-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Courland Prospect — capture LinkedIn chats into the CRM.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.7.1",
+    "@types/chrome": "^0.2.2",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}

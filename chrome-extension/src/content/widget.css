@@ -1,0 +1,285 @@
+/* Injected into LinkedIn. Namespaced under .cp- and kept visually quiet so it
+   sits comfortably in the compose bar. Custom ease-out curve (built-ins lack
+   punch); only transform/opacity/color transitions (GPU-friendly). */
+
+.cp-widget {
+  /* Courland heraldic crimson (from the app icon) for our injected UI. */
+  --cp-accent: #c11b36;
+  --cp-accent-hover: #a5122a;
+
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap; /* narrow overlay-bubble footers: wrap instead of overflow */
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  /* Our own row, sitting directly below the message text area and above the
+     composer's send/toolbar row; the hairline separates it from the text area. */
+  padding: 8px 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+.cp-select {
+  height: 28px;
+  min-width: 0; /* allow shrinking inside a cramped bubble footer */
+  max-width: 120px;
+  flex: 0 1 auto;
+  padding: 0 6px;
+  font-size: 12px;
+  color: #1d2226;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 14px;
+  cursor: pointer;
+}
+
+.cp-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.cp-add {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--cp-accent); /* Courland crimson (app icon) */
+  border: none;
+  border-radius: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    background-color 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    opacity 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cp-add:hover:not(:disabled) {
+    background: var(--cp-accent-hover);
+  }
+}
+
+.cp-add:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cp-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cp-add[data-busy="true"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+/* Floating feedback, absolutely positioned above the row. */
+.cp-feedback {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  max-width: 260px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: #fff;
+  border-radius: 8px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+  transition:
+    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 2147483000;
+}
+
+.cp-feedback[data-show="true"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.cp-feedback[data-kind="success"] {
+  background: #0b7a3b;
+}
+.cp-feedback[data-kind="info"] {
+  background: #3d4b5c;
+}
+.cp-feedback[data-kind="error"] {
+  background: #b3261e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cp-add,
+  .cp-feedback {
+    transition-property: opacity, background-color;
+  }
+  .cp-add:active:not(:disabled) {
+    transform: none;
+  }
+  .cp-feedback {
+    transform: none;
+  }
+  .cp-feedback[data-show="true"] {
+    transform: none;
+  }
+}
+
+/* ── "Draft for [N]" batch control ──────────────────────────────────────────
+   Its own full-width row, injected directly under the messaging top bar (above
+   the thread list). One horizontal line — [pitch] [Draft for] [count] — with a
+   hairline separating it from the list. The status line floats just below the
+   row (absolute) so it never stretches it. */
+.cp-draft-control {
+  --cp-accent: #c11b36;
+  --cp-accent-hover: #a5122a;
+
+  position: relative; /* anchor for the floating feedback */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  background: #fff;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+.cp-draft-pitch {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 240px;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 13px;
+  color: #1d2226;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 15px;
+  cursor: pointer;
+}
+
+.cp-draft-pitch:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.cp-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.cp-draft-btn {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--cp-accent);
+  border: none;
+  border-radius: 15px;
+  cursor: pointer;
+  white-space: nowrap;
+  /* Only transform/color; entering-feel ease-out under 300ms (see design skill). */
+  transition:
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    background-color 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    opacity 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cp-draft-btn:hover:not(:disabled) {
+    background: var(--cp-accent-hover);
+  }
+}
+
+.cp-draft-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.cp-draft-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cp-draft-btn[data-busy="true"] {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.cp-draft-count {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 6px;
+  font-size: 13px;
+  color: #1d2226;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 15px;
+  cursor: pointer;
+}
+
+/* Status line: floats just below the top bar so it never stretches the row.
+   Anchored to the control, eased in from a hair above. */
+.cp-draft-feedback {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  max-width: 280px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #3d4b5c;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.cp-draft-feedback[data-show="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.cp-draft-feedback[data-kind="success"] {
+  color: #0b7a3b;
+}
+.cp-draft-feedback[data-kind="error"] {
+  color: #b3261e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cp-draft-btn {
+    transition-property: opacity, background-color;
+  }
+  .cp-draft-btn:active:not(:disabled) {
+    transform: none;
+  }
+  .cp-draft-feedback {
+    transition-property: opacity;
+    transform: none;
+  }
+  .cp-draft-feedback[data-show="true"] {
+    transform: none;
+  }
+}

@@ -1,0 +1,81 @@
+/* Capture-feedback toasts, injected top-right on the LinkedIn page. Deliberately
+   quiet: a light card with a small kind-colored dot rather than a loud colored
+   fill, so it confirms without interrupting messaging. Only transform/opacity
+   transition (GPU-friendly, interruptible — toasts stack and clear rapidly). */
+
+.cp-toaster {
+  --cp-accent: #c11b36; /* Courland crimson */
+  --cp-ease: cubic-bezier(0.23, 1, 0.32, 1);
+
+  position: fixed;
+  top: 64px; /* clear LinkedIn's ~52px fixed top nav */
+  right: 20px;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none; /* only the toasts themselves are interactive */
+}
+
+.cp-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 300px;
+  padding: 9px 12px;
+  color: #1d2226;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  font:
+    500 13px/1.35 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  pointer-events: auto;
+  cursor: default;
+
+  /* Base = hidden/exit state. Exit uses this shorter duration; the enter rule
+     below overrides to a slightly longer one (enter deliberate, exit snappy). */
+  opacity: 0;
+  transform: translateX(8px);
+  transition:
+    opacity 160ms var(--cp-ease),
+    transform 160ms var(--cp-ease);
+}
+
+.cp-toast[data-enter="true"] {
+  opacity: 1;
+  transform: translateX(0);
+  transition-duration: 220ms;
+}
+
+.cp-toast__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3d4b5c; /* info (neutral) default */
+}
+
+.cp-toast[data-kind="success"] .cp-toast__dot {
+  background: #0b7a3b;
+}
+.cp-toast[data-kind="error"] .cp-toast__dot {
+  background: var(--cp-accent);
+}
+
+.cp-toast__text {
+  min-width: 0;
+}
+
+/* Reduced motion: keep the fade (aids comprehension), drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .cp-toast {
+    transform: none;
+    transition: opacity 160ms ease;
+  }
+}
