@@ -1,9 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { errorMessage } from "../lib/errors";
+import { polishSkill } from "../api/pitches";
+import type { StageInput } from "../api/stages";
+import { useAsyncAction } from "../lib/useAsyncAction";
+import PolishButton from "../components/PolishButton";
+import StageEditor, { type DraftStage, fullCycleDraft } from "./StageEditor";
 import styles from "./CreatePitchView.module.css";
 
 interface Props {
-  onCreate: (name: string, skill: string) => Promise<void>;
+  onCreate: (name: string, skill: string, stages: StageInput[]) => Promise<void>;
   onCancel: () => void;
 }
 
@@ -12,14 +16,15 @@ interface Props {
 export default function CreatePitchView({ onCreate, onCancel }: Props) {
   const [name, setName] = useState("");
   const [skill, setSkill] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Seeded with the Full-cycle template; the user tweaks it before creating.
+  const [stages, setStages] = useState<DraftStage[]>(fullCycleDraft);
+  const [polishing, setPolishing] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
-  // Synchronous re-entry guard: state updates are async, so two submit events
-  // in one frame (Enter-repeat, Enter+click) could both pass a state-only check.
-  const submittingRef = useRef(false);
+  const { busy: submitting, error, setError, run } = useAsyncAction();
 
-  const canSubmit = name.trim().length > 0 && !submitting;
+  // Block submit while polishing so the incoming rewrite can't land after the
+  // pitch is already created (and so the skill field stays locked).
+  const canSubmit = name.trim().length > 0 && !submitting && !polishing;
 
   useEffect(() => {
     nameRef.current?.focus();
@@ -34,23 +39,17 @@ export default function CreatePitchView({ onCreate, onCancel }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onCancel, submitting]);
 
-  async function handleSubmit(e: FormEvent) {
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    // Guard order matters: bail on invalid/empty BEFORE claiming the ref, or a
-    // rejected submit would leave the ref stuck true and dead-lock the form.
-    if (!canSubmit || submittingRef.current) return;
-    submittingRef.current = true;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await onCreate(name.trim(), skill.trim());
-    } catch (err) {
-      // Keep the form open with its values so the user can retry.
-      setError(errorMessage(err));
-    } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
-    }
+    if (!canSubmit) return;
+    // On failure `run` keeps the form open with its values (in `error`) to retry.
+    run(() =>
+      onCreate(
+        name.trim(),
+        skill.trim(),
+        stages.map((s) => ({ name: s.name, kind: s.kind, color: s.color })),
+      ),
+    );
   }
 
   return (
@@ -104,15 +103,39 @@ export default function CreatePitchView({ onCreate, onCancel }: Props) {
             onChange={(e) => setName(e.target.value)}
           />
 
-          <label className={styles.fieldLabel} htmlFor="pitch-skill">
-            Skill
-          </label>
+          <div className={styles.skillHeader}>
+            <label className={styles.fieldLabel} htmlFor="pitch-skill">
+              Skill
+            </label>
+            <PolishButton
+              text={skill}
+              polish={polishSkill}
+              disabled={submitting}
+              onPolished={setSkill}
+              onError={setError}
+              onBusyChange={setPolishing}
+            />
+          </div>
           <textarea
             id="pitch-skill"
             className={styles.textarea}
             placeholder="What is this pitch about? The angle, who it's for, why it lands."
             value={skill}
             onChange={(e) => setSkill(e.target.value)}
+            disabled={submitting || polishing}
+          />
+
+          <span className={`${styles.fieldLabel} ${styles.stagesLabel}`}>
+            Pipeline stages
+          </span>
+          <p className={styles.hint}>
+            The funnel prospects move through. The first is the messaging stage,
+            where you track outreach. Tweak now or later in Settings.
+          </p>
+          <StageEditor
+            stages={stages}
+            onChange={(next) => setStages(next)}
+            disabled={submitting}
           />
 
           {error && <div className={styles.error}>{error}</div>}

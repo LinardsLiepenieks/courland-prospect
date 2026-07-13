@@ -20,6 +20,18 @@
   /* Focus ring shared by all inputs/triggers. */
   --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 
+  /* Stage palette — one accent per token; soft tints are derived at use-site
+     with color-mix. Editable per stage; stored as the token name, not a hex,
+     so it re-themes in dark mode. */
+  --stage-blue: #2563eb;
+  --stage-green: #16a34a;
+  --stage-amber: #d97706;
+  --stage-red: #dc2626;
+  --stage-purple: #7c3aed;
+  --stage-teal: #0d9488;
+  --stage-pink: #db2777;
+  --stage-gray: #6b7280;
+
   color-scheme: light dark;
 }
 
@@ -38,6 +50,16 @@
     --danger: #f87171;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+
+    /* Brighter accents for dark surfaces. */
+    --stage-blue: #3b82f6;
+    --stage-green: #22c55e;
+    --stage-amber: #f59e0b;
+    --stage-red: #f87171;
+    --stage-purple: #a78bfa;
+    --stage-teal: #2dd4bf;
+    --stage-pink: #f472b6;
+    --stage-gray: #9ca3af;
   }
 }
 

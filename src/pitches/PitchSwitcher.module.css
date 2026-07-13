@@ -10,13 +10,12 @@
   gap: 8px;
   max-width: 320px;
   padding: 7px 10px 7px 12px;
-  background: var(--surface);
+  background: transparent;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
   color: var(--text);
   font-size: 14px;
   font-weight: 550;
-  box-shadow: var(--shadow-sm);
   transition:
     border-color 140ms var(--ease-out),
     background-color 140ms var(--ease-out),

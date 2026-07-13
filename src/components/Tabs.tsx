@@ -34,7 +34,11 @@ export default function Tabs<Id extends string>({
     // CSS.escape guards the generic Id: a future id with quotes/metachars
     // would otherwise make querySelector throw during layout.
     const el = list.querySelector<HTMLElement>(`[data-id="${CSS.escape(active)}"]`);
+    // When the active tab lives in another group (the nav splits its tabs into
+    // left/right lists), collapse this group's indicator to nothing — shrinking
+    // width in place rather than sliding to a phantom position.
     if (el) setIndicator({ left: el.offsetLeft, width: el.offsetWidth });
+    else setIndicator((prev) => ({ ...prev, width: 0 }));
   }, [active, items]);
 
   return (

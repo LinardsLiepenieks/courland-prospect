@@ -19,65 +19,48 @@
   composes: textarea from "../styles/form.module.css";
 }
 
+.skillHeader {
+  composes: fieldHeader from "../styles/form.module.css";
+}
+
 .error {
   composes: error from "../styles/form.module.css";
 }
 
 .actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 24px;
-}
-
-.saved {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  opacity: 0;
-  transform: translateY(2px);
-  transition:
-    opacity 200ms var(--ease-out),
-    transform 200ms var(--ease-out);
-  pointer-events: none;
-}
-
-.saved[data-visible="true"] {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.saved svg {
-  color: var(--accent);
+  composes: actions from "../styles/form.module.css";
 }
 
 .primaryBtn {
-  padding: 10px 18px;
-  color: var(--accent-contrast);
-  background: var(--accent);
-  border: 1px solid transparent;
-  border-radius: 9px;
+  composes: primaryBtn from "../styles/form.module.css";
+}
+
+/* ── Pipeline stages / Snippets — same section rhythm ────── */
+.pipeline,
+.snippetsBlock {
+  margin-top: 36px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.pipelineHead {
+  margin-bottom: 14px;
+}
+
+.sectionTitle {
   font-size: 14px;
   font-weight: 550;
-  transition:
-    background-color 140ms var(--ease-out),
-    transform 140ms var(--ease-out);
 }
 
-.primaryBtn:hover:not(:disabled) {
-  background: var(--accent-hover);
+.sectionBody {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
-.primaryBtn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.primaryBtn:disabled {
-  opacity: 0.5;
+/* Reserve height while the (near-instant) local query resolves. */
+.pipelineLoading {
+  min-height: 180px;
 }
 
 /* ── Danger zone ─────────────────────────────────────────── */
@@ -172,11 +155,8 @@
   .edit {
     animation: none;
   }
-  .saved {
-    transition: opacity 200ms var(--ease-out);
-    transform: none;
-  }
-  .primaryBtn:active:not(:disabled),
+  /* .saved and .primaryBtn get their reduced-motion handling from the shared
+     form module they compose. */
   .deleteTrigger:active:not(:disabled),
   .deleteBtn:active:not(:disabled),
   .secondaryBtn:active:not(:disabled) {

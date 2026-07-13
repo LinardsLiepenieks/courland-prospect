@@ -4,15 +4,20 @@ import PitchSwitcher from "../pitches/PitchSwitcher";
 import PitchDetail from "../pitches/PitchDetail";
 import EditPitchView from "../pitches/EditPitchView";
 import ProspectsView from "../prospects/ProspectsView";
+import ProfileView from "../profile/ProfileView";
 import styles from "./app.module.css";
 
-export type TabId = "pitch" | "prospects" | "settings";
+export type TabId = "pitch" | "prospects" | "settings" | "profile";
 
-const TABS: TabItem<TabId>[] = [
+// Pitch-scoped views sit on the left; Profile is global (not tied to a pitch),
+// so it's pushed to the far right of the nav to read as distinct.
+const LEFT_TABS: TabItem<TabId>[] = [
   { id: "pitch", label: "Pitch" },
   { id: "prospects", label: "Prospects" },
   { id: "settings", label: "Settings" },
 ];
+
+const RIGHT_TABS: TabItem<TabId>[] = [{ id: "profile", label: "Profile" }];
 
 interface Props {
   pitches: Pitch[];
@@ -48,7 +53,9 @@ export default function AppShell({
             onCreateNew={onCreateNew}
           />
           <span className={styles.navDivider} aria-hidden="true" />
-          <Tabs items={TABS} active={activeTab} onChange={onChangeTab} />
+          <Tabs items={LEFT_TABS} active={activeTab} onChange={onChangeTab} />
+          <span className={styles.navSpacer} aria-hidden="true" />
+          <Tabs items={RIGHT_TABS} active={activeTab} onChange={onChangeTab} />
         </div>
       </header>
 
@@ -56,7 +63,10 @@ export default function AppShell({
         {activeTab === "pitch" && (
           <PitchDetail pitch={activePitch} onCreateNew={onCreateNew} />
         )}
-        {activeTab === "prospects" && <ProspectsView />}
+        {activeTab === "prospects" && (
+          <ProspectsView pitch={activePitch} onCreateNew={onCreateNew} />
+        )}
+        {activeTab === "profile" && <ProfileView />}
         {activeTab === "settings" && (
           <EditPitchView
             pitch={activePitch}

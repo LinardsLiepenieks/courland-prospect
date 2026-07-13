@@ -1,0 +1,103 @@
+/* Floating surface — positioned via inline top/left (viewport coords, since it's
+   portalled to <body> and fixed). Scales in from the top-left (the trigger). */
+.surface {
+  position: fixed;
+  z-index: 50;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  transform-origin: top left;
+  animation: popIn 140ms var(--ease-out) both;
+}
+
+@keyframes popIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-out);
+}
+
+.item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.item[data-current] {
+  font-weight: 600;
+}
+
+/* Destructive action (e.g. Delete) tints toward danger. */
+.item[data-danger] {
+  color: var(--danger);
+}
+
+.item[data-danger]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.itemLeading {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.itemLeading svg {
+  width: 15px;
+  height: 15px;
+}
+
+.itemLabel {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0;
+}
+
+.check[data-visible] {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface {
+    animation: none;
+  }
+}

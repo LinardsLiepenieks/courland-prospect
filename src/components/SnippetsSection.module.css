@@ -1,0 +1,243 @@
+.snippets {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Reserve height while the (near-instant) local query resolves, so the section
+   below doesn't jump when snippets land. */
+.loading {
+  min-height: 96px;
+}
+
+.empty {
+  margin: 2px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── List ────────────────────────────────────────────────── */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── Card ────────────────────────────────────────────────── */
+/* A "note" card: borderless fields inside, so the whole card is the focus
+   surface — it lights up on focus-within rather than each field boxing itself. */
+.card {
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out),
+    opacity 150ms var(--ease-out);
+  animation: enterUp 240ms var(--ease-out) both;
+}
+
+.card:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* Dim while its delete request is in flight. */
+.card[data-deleting="true"] {
+  opacity: 0.5;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Name reads as the card's title — no chrome until you're in it, with a hairline
+   that keeps rows aligned (always present so focus adds no layout shift). */
+.nameInput {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 0;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 600;
+  outline: none;
+}
+
+.nameInput::placeholder {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.contentInput {
+  width: 100%;
+  min-height: 60px;
+  margin-top: 8px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+
+.contentInput::placeholder {
+  color: var(--text-faint);
+}
+
+/* ── Delete affordance ───────────────────────────────────── */
+/* Quiet icon until intent; a tap swaps in the Cancel / Delete confirm. */
+.removeBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.removeBtn:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.removeBtn:active {
+  transform: scale(0.92);
+}
+
+.confirm {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.secondaryBtn,
+.deleteBtn {
+  flex-shrink: 0;
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.secondaryBtn:active:not(:disabled),
+.deleteBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.secondaryBtn:disabled,
+.deleteBtn:disabled {
+  opacity: 0.5;
+}
+
+.secondaryBtn {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.secondaryBtn:hover:not(:disabled) {
+  border-color: var(--text-faint);
+}
+
+.deleteBtn {
+  color: #fff;
+  background: var(--danger);
+  border: 1px solid transparent;
+}
+
+.deleteBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, #000);
+}
+
+/* ── Card footer / errors ────────────────────────────────── */
+.cardFoot {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 18px;
+  margin-top: 6px;
+}
+
+.cardError {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+/* ── Add button ──────────────────────────────────────────── */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 550;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.addBtn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.addBtn:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.addBtn:disabled {
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+    transition:
+      border-color 150ms var(--ease-out),
+      box-shadow 150ms var(--ease-out);
+  }
+  .removeBtn:active,
+  .secondaryBtn:active:not(:disabled),
+  .deleteBtn:active:not(:disabled),
+  .addBtn:active:not(:disabled) {
+    transform: none;
+  }
+}

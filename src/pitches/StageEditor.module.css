@@ -1,0 +1,290 @@
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Reorder arrows, stacked tight on the left. */
+.reorder {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.moveBtn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out);
+}
+
+.moveBtn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.moveBtn:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.moveBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.moveBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Name field + messaging badge share a row that flexes to fill. */
+.field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 14px;
+  outline: none;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+/* Messaging row: leave room for the inline badge so text never slides under it. */
+.row[data-messaging] .input {
+  padding-right: 96px;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.input:disabled {
+  opacity: 0.6;
+}
+
+.badge {
+  position: absolute;
+  right: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.removeBtn {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.removeBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.removeBtn:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.removeBtn:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.removeBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.removeBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Keeps messaging rows aligned with rows that have a remove button. */
+.removeSpacer {
+  width: 30px;
+  flex-shrink: 0;
+}
+
+/* ── Color swatch + palette popover ──────────────────────── */
+.swatchWrap {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--stage-accent);
+  box-shadow: 0 0 0 1px var(--border-strong);
+  cursor: pointer;
+  transition:
+    transform 120ms var(--ease-out),
+    box-shadow 120ms var(--ease-out);
+}
+
+.swatch:hover:not(:disabled) {
+  box-shadow: 0 0 0 1px var(--text-faint);
+}
+
+.swatch:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.swatch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.swatch:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Grid layout only — the floating surface (bg, border, shadow, animation) is
+   supplied by the shared Popover. */
+.palette {
+  display: grid;
+  grid-template-columns: repeat(4, 24px);
+  justify-content: center;
+  gap: 6px;
+  padding: 4px;
+}
+
+.paletteSwatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--stage-accent);
+  box-shadow: 0 0 0 1px var(--border);
+  cursor: pointer;
+  transition: transform 120ms var(--ease-out);
+}
+
+.paletteSwatch:hover {
+  transform: scale(1.12);
+}
+
+.paletteSwatch[data-current] {
+  border-color: var(--surface);
+  box-shadow: 0 0 0 2px var(--stage-accent);
+}
+
+.paletteSwatch:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Add-stage: dashed ghost button that reads as "append". */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 7px 12px 7px 10px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.addBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.addBtn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-faint);
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.addBtn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.addBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .removeBtn:active:not(:disabled),
+  .addBtn:active:not(:disabled),
+  .swatch:active:not(:disabled) {
+    transform: none;
+  }
+  .paletteSwatch:hover {
+    transform: none;
+  }
+}

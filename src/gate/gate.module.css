@@ -1,0 +1,190 @@
+.screen {
+  /* Fixed opaque overlay: covers the always-mounted app so a transient
+     not-ready blip gates the UI without unmounting (and losing) it. */
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 360px;
+  padding: 36px 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+  animation: enterUp 300ms var(--ease-out) both;
+}
+
+.cardWide {
+  max-width: 440px;
+  text-align: left;
+  align-items: stretch;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.body {
+  margin: 10px 0 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.steps {
+  margin: 18px 0 4px;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.steps strong {
+  font-weight: 600;
+}
+
+.code {
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  border-radius: 5px;
+}
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghost {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), background-color 160ms var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ghost:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+  }
+}
+
+.ghost:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Profile launcher on the Chrome-closed screen: a quiet caption above the
+   profile selector + Open button. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 20px;
+}
+
+.pickerLabel {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Passive "waiting for the extension" row on the extension-missing screen —
+   the gate advances on its own via the heartbeat, so there's no button. */
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.spinnerSmall {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-top-color: var(--accent);
+  animation: cpspin 620ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinnerSmall {
+    animation-duration: 1.2s;
+  }
+}
+
+/* Fast spinner — a quicker spin reads as "loading faster". */
+.spinner {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 16px;
+  border-radius: 50%;
+  border: 2.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-top-color: var(--accent);
+  animation: cpspin 620ms linear infinite;
+}
+
+@keyframes cpspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+  .ghost:active:not(:disabled) {
+    transform: none;
+  }
+  .spinner {
+    animation-duration: 1.2s;
+  }
+}

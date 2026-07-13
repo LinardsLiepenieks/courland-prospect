@@ -17,9 +17,9 @@
   display: flex;
   align-items: center;
   gap: 14px;
-  max-width: 720px;
+  max-width: min(1080px, 90vw);
   margin: 0 auto;
-  padding: 12px 16px;
+  padding: 12px 12px;
 }
 
 /* Separates the pitch-context selector from the view tabs. */
@@ -30,9 +30,14 @@
   background: var(--border);
 }
 
+/* Pushes the global Profile tab to the far right of the nav row. */
+.navSpacer {
+  flex: 1;
+}
+
 /* ── Content ─────────────────────────────────────────────── */
 .content {
-  max-width: 720px;
+  max-width: min(1080px, 90vw);
   margin: 0 auto;
-  padding: 32px 16px 96px;
+  padding: 32px 12px 96px;
 }

@@ -6,6 +6,9 @@ import {
   updatePitch,
   type Pitch,
 } from "../api/pitches";
+import type { StageInput } from "../api/stages";
+import LoadError from "../components/LoadError";
+import { errorMessage } from "../lib/errors";
 import CreatePitchView from "../pitches/CreatePitchView";
 import AppShell, { type TabId } from "./AppShell";
 
@@ -21,12 +24,16 @@ export default function App() {
   const [activePitchId, setActivePitchId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("pitch");
   const [mode, setMode] = useState<Mode>("shell");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Bumped by the retry button to re-run the load effect after a failure.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     // `active` short-circuits a resolve after unmount (incl. StrictMode's
     // double-mount) and pairs with the `.catch` so a failed load can't become
     // an unhandled rejection.
     let active = true;
+    setLoadError(null);
     listPitches()
       .then((loaded) => {
         if (!active) return;
@@ -37,20 +44,24 @@ export default function App() {
         setPitches((prev) => (prev.length > 0 ? prev : loaded));
         setActivePitchId((prev) => prev ?? loaded[0]?.id ?? null);
       })
-      // TODO: once the shell has an error surface, distinguish a load failure
-      // from a genuinely empty DB here rather than only logging.
+      // A failed load surfaces a recoverable error screen (with retry) instead
+      // of silently leaving an empty shell that looks like a fresh, blank DB.
       .catch((e) => {
-        if (active) console.error("Failed to load pitches", e);
+        if (active) setLoadError(errorMessage(e));
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadKey]);
 
   const activePitch = pitches.find((p) => p.id === activePitchId) ?? null;
 
-  async function handleCreate(name: string, skill: string) {
-    const created = await createPitch(name, skill);
+  async function handleCreate(
+    name: string,
+    skill: string,
+    stages: StageInput[],
+  ) {
+    const created = await createPitch(name, skill, stages);
     setPitches((prev) => [created, ...prev]);
     setActivePitchId(created.id);
     setActiveTab("pitch");
@@ -72,6 +83,16 @@ export default function App() {
     setPitches((prev) => prev.filter((p) => p.id !== id));
     setActivePitchId((cur) => (cur === id ? (remaining[0]?.id ?? null) : cur));
     setActiveTab("pitch");
+  }
+
+  if (loadError) {
+    return (
+      <LoadError
+        what="your pitches"
+        detail={loadError}
+        onRetry={() => setReloadKey((k) => k + 1)}
+      />
+    );
   }
 
   if (mode === "create") {

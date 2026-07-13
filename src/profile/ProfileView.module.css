@@ -1,0 +1,98 @@
+.profile {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* ── Page intro ──────────────────────────────────────────── */
+.intro {
+  margin-bottom: 28px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── Sections ────────────────────────────────────────────── */
+/* Each section is separated by a hairline so the two concerns (context vs.
+   capture browsers) read as distinct groups on one page. */
+.section {
+  padding-top: 28px;
+  margin-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.section:first-of-type {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
+}
+
+.sectionTitle {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.sectionSub {
+  margin-top: 4px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── About-you form (fields composed from the shared form module) ─ */
+.form {
+  composes: form from "../styles/form.module.css";
+}
+
+.fieldLabel {
+  composes: fieldLabel from "../styles/form.module.css";
+}
+
+.fieldHeader {
+  composes: fieldHeader from "../styles/form.module.css";
+}
+
+/* The first field sits directly under the section intro — drop the shared
+   top gap so it isn't double-spaced. */
+.fieldHeader:first-of-type {
+  margin-top: 0;
+}
+
+.textarea {
+  composes: textarea from "../styles/form.module.css";
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+.actions {
+  composes: actions from "../styles/form.module.css";
+}
+
+.primaryBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+}
+
+/* ── Load state ──────────────────────────────────────────── */
+/* Reserves the vertical space the form will occupy so the layout doesn't jump
+   when the singleton resolves. */
+.loading {
+  min-height: 300px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile {
+    animation: none;
+  }
+}

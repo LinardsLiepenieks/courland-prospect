@@ -1,0 +1,198 @@
+/* Horizontally-scrolling board; columns keep a comfortable fixed width. */
+.board {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 4px 4px 16px;
+  /* Contain horizontal scroll so the page body never scrolls sideways. */
+  scrollbar-width: thin;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 260px;
+  max-height: 100%;
+  padding: 8px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition:
+    background-color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
+}
+
+/* Highlight the column a card is being dragged over. */
+.column[data-over] {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.columnHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 10px;
+}
+
+.columnName {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Stage color dot; a ring marks the messaging stage. */
+.colorDot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--stage-accent, var(--text-faint));
+}
+
+.colorDot[data-messaging] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--stage-accent, var(--text-faint)) 30%, transparent);
+}
+
+.columnCount {
+  min-width: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 999px;
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 48px;
+  overflow-y: auto;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  /* Colored left edge = the card's stage (inherits --stage-accent from column). */
+  border-left: 3px solid var(--stage-accent, var(--border));
+  border-radius: 10px;
+  box-shadow: var(--shadow-sm);
+  cursor: grab;
+  transition:
+    box-shadow 160ms var(--ease-out),
+    background-color 200ms var(--ease-out),
+    opacity 160ms var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+/* Responded: a soft green wash signalling the prospect has replied. The stage's
+ * colored left border stays untouched, so stage (border) and engagement (fill)
+ * read as two separate channels. Washing in via the transition above means a
+ * card turns green smoothly when a reply lands and the view live-refreshes. */
+.card[data-responded] {
+  background: color-mix(in srgb, var(--stage-green) 8%, var(--surface));
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .card:hover {
+    box-shadow: var(--shadow-md);
+  }
+}
+
+.card:active {
+  cursor: grabbing;
+}
+
+/* The card being dragged: dim + shrink slightly so the drop target reads clear. */
+.card[data-dragging] {
+  opacity: 0.5;
+  transform: scale(0.98);
+}
+
+.cardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cardName {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardName:hover {
+  color: var(--accent);
+}
+
+.cardName:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
+}
+
+.cardHeadline {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+/* Engagement tags (message count, responded) grouped left; stage menu sits right
+ * via the foot's space-between. Wraps as a unit when the card is narrow. */
+.cardTags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.columnEmpty {
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-faint);
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card[data-dragging] {
+    transform: none;
+  }
+}

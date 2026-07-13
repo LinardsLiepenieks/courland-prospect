@@ -56,6 +56,23 @@
   line-height: 1.5;
 }
 
+/* A field label paired with an inline action (e.g. a Polish button) on one row.
+   The wrapper owns the field spacing; the label drops its own margins — as the
+   only <label> in the row it's first-of-type, so the shared margin-top never
+   applies, and this zeroes the margin-bottom. */
+.fieldHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 20px;
+  margin-bottom: 6px;
+}
+
+.fieldHeader label {
+  margin-bottom: 0;
+}
+
 .error {
   margin-top: 16px;
   padding: 9px 12px;
@@ -65,4 +82,74 @@
   border-radius: 8px;
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* ── Form actions — the save row shared by editing surfaces ── */
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+/* A quiet "Saved ✓" confirmation that fades in and settles. Driven by a
+   data-visible attribute so it can animate out without unmounting. */
+.saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+  pointer-events: none;
+}
+
+.saved[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.saved svg {
+  color: var(--accent);
+}
+
+.primaryBtn {
+  padding: 10px 18px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.primaryBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.primaryBtn:disabled {
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .saved {
+    transition: opacity 200ms var(--ease-out);
+    transform: none;
+  }
+  .primaryBtn:active:not(:disabled) {
+    transform: none;
+  }
 }

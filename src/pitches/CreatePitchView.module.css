@@ -97,10 +97,27 @@
   composes: textarea from "../styles/form.module.css";
 }
 
+.skillHeader {
+  composes: fieldHeader from "../styles/form.module.css";
+}
+
 .error {
   composes: error from "../styles/form.module.css";
 }
 
+.stagesLabel {
+  margin-top: 24px;
+}
+
+.hint {
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* Two-button row (Cancel + Create) — its own layout, distinct from the shared
+   form module's single-primary save row (which centers a SavedIndicator). */
 .actions {
   display: flex;
   justify-content: flex-end;
@@ -108,46 +125,36 @@
   margin-top: 32px;
 }
 
-.primaryBtn,
+/* Primary action reuses the shared button (padding, colors, hover/active/
+   disabled, and reduced-motion all come with the composed class). */
+.primaryBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+}
+
+/* Secondary (Cancel) has no shared equivalent — kept local. */
 .secondaryBtn {
   padding: 10px 18px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-strong);
   border-radius: 9px;
   font-size: 14px;
   font-weight: 550;
   transition:
-    background-color 140ms var(--ease-out),
     border-color 140ms var(--ease-out),
     transform 140ms var(--ease-out);
 }
 
-.primaryBtn {
-  color: var(--accent-contrast);
-  background: var(--accent);
-  border: 1px solid transparent;
+.secondaryBtn:hover:not(:disabled) {
+  border-color: var(--text-faint);
 }
 
-.primaryBtn:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.primaryBtn:active:not(:disabled),
 .secondaryBtn:active:not(:disabled) {
   transform: scale(0.97);
 }
 
-.primaryBtn:disabled,
 .secondaryBtn:disabled {
   opacity: 0.5;
-}
-
-.secondaryBtn {
-  color: var(--text);
-  background: transparent;
-  border: 1px solid var(--border-strong);
-}
-
-.secondaryBtn:hover:not(:disabled) {
-  border-color: var(--text-faint);
 }
 
 @keyframes screenIn {
@@ -166,7 +173,6 @@
     animation: none;
   }
   .back:active:not(:disabled),
-  .primaryBtn:active:not(:disabled),
   .secondaryBtn:active:not(:disabled) {
     transform: none;
   }

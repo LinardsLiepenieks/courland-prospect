@@ -1,4 +1,97 @@
 .wrap {
+  padding: 28px 16px 48px;
+  max-width: min(720px, 100%);
+  margin: 0 auto;
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* Pipeline needs room for several columns; fill the (fluid) content column and
+   let the board scroll horizontally within it. */
+.wrapWide {
+  padding: 28px 16px 48px;
+  width: 100%;
+  margin: 0 auto;
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 4px 14px;
+}
+
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.count {
+  min-width: 20px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 999px;
+}
+
+.headSpacer {
+  flex: 1;
+}
+
+/* ── View toggle (segmented) ─────────────────────────────── */
+.toggle {
+  display: inline-flex;
+  padding: 2px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-radius: 9px;
+}
+
+.toggleBtn {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out);
+}
+
+.toggleBtn:hover:not([data-active]) {
+  color: var(--text);
+}
+
+.toggleBtn[data-active] {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.toggleBtn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.actionError {
+  margin: 0 4px 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
+  border-radius: 9px;
+}
+
+/* Empty (pitch exists, no prospects captured yet) */
+.blank {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -7,32 +100,34 @@
   animation: enterUp 260ms var(--ease-out) both;
 }
 
-.badge {
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-  border-radius: 999px;
-}
-
-.title {
-  margin: 16px 0 0;
+.blankTitle {
+  margin: 0;
   font-size: 18px;
   font-weight: 600;
 }
 
-.body {
+.blankBody {
   margin: 8px 0 0;
-  max-width: 340px;
+  max-width: 360px;
   font-size: 14px;
   color: var(--text-muted);
   line-height: 1.6;
 }
 
+.blankBody strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Reserve vertical space while the (near-instant) local query resolves. */
+.loading {
+  min-height: 200px;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .wrap {
+  .wrap,
+  .wrapWide,
+  .blank {
     animation: none;
   }
 }

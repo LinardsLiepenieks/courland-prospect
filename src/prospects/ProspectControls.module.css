@@ -1,0 +1,115 @@
+/* ── Message count (read-only, auto-tracked) ─────────────── */
+.count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-radius: 8px;
+  color: var(--text-muted);
+  /* Not interactive — signal that plainly. */
+  cursor: default;
+}
+
+.count svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.8;
+}
+
+.countValue {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* ── Responded badge (read-only, durable) ────────────────── */
+.responded {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--stage-green);
+  background: color-mix(in srgb, var(--stage-green) 14%, transparent);
+  border-radius: 8px;
+  /* Not interactive — signal that plainly. */
+  cursor: default;
+  white-space: nowrap;
+}
+
+.responded svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.9;
+}
+
+/* ── Stage menu ──────────────────────────────────────────── */
+.stageMenu {
+  display: inline-flex;
+}
+
+.stagePill {
+  --pill: var(--stage-accent, var(--text-muted));
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  padding: 3px 8px 3px 8px;
+  color: var(--pill);
+  background: color-mix(in srgb, var(--pill) 12%, transparent);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 120ms var(--ease-out),
+    border-color 120ms var(--ease-out);
+}
+
+.stagePillDot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--pill);
+}
+
+.stagePillName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stagePill:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--pill) 20%, transparent);
+}
+
+.stagePill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.stagePill:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chevron {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* Leading stage-color dot inside a menu item. */
+.dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--stage-accent, var(--text-faint));
+}

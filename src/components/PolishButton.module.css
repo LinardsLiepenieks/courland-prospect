@@ -1,0 +1,60 @@
+/* A quiet, accent-tinted action that sits beside the Skill label. Subordinate
+   to the primary Save button — it invites, it doesn't compete. */
+.polish {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.polish:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.polish:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.polish:disabled {
+  /* Muted while running, or when there's nothing to polish yet. */
+  opacity: 0.5;
+}
+
+.icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+}
+
+.spinner {
+  transform-origin: center;
+  animation: polishSpin 640ms linear infinite;
+}
+
+@keyframes polishSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .polish:active:not(:disabled) {
+    transform: none;
+  }
+  /* Keep the spinner — it's genuine progress feedback — but slow it so it reads
+     as calm rather than frantic. */
+  .spinner {
+    animation-duration: 1200ms;
+  }
+}
