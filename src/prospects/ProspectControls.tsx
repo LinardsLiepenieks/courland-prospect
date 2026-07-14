@@ -19,14 +19,15 @@ export function MessageCount({ value }: { value: number }) {
   );
 }
 
-/** Durable "they replied" marker — read-only, shown on any prospect who has
- *  responded, in any stage. Green to match the card's responded wash; a reply
- *  arrow reinforces the meaning at a glance. Not interactive. */
-export function RespondedBadge() {
+/** "They replied and you owe them an answer" marker — read-only, shown on any
+ *  prospect whose newest message is incoming, in any stage. It clears once you
+ *  answer. Green to match the card's awaiting-reply wash; a reply arrow
+ *  reinforces the meaning at a glance. Not interactive. */
+export function AwaitingReplyBadge() {
   return (
-    <span className={styles.responded} title="This prospect has replied to you">
+    <span className={styles.awaitingReply} title="Replied — you haven't answered yet">
       <ReplyIcon />
-      Responded
+      Awaiting reply
     </span>
   );
 }

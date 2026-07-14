@@ -33,8 +33,8 @@ export interface AddProspectResult {
 }
 
 /** Who sent a captured message. `outgoing` = you messaged the prospect (drives
- *  the messages-sent count); `incoming` = the prospect replied (drives their
- *  durable "responded" state). */
+ *  the messages-sent count); `incoming` = the prospect replied. The newest
+ *  message's direction drives their "awaiting reply" state. */
 export type MessageDirection = "outgoing" | "incoming";
 
 /** One message scraped from a LinkedIn thread. `li_key` is a stable per-message
@@ -85,7 +85,7 @@ export interface DraftResult {
 /** What became of an attempted capture, reported back so the content script can
  *  give immediate feedback:
  *   - `stored`  — recorded against a tracked prospect (outgoing count bumped, or
- *                 an incoming reply marked them responded).
+ *                 an incoming reply set them awaiting a reply).
  *   - `skipped` — accepted but not a tracked prospect (normal; no toast).
  *   - `offline` — the app couldn't be reached; the message stays queued in the
  *                 durable outbox and syncs on the next drain.

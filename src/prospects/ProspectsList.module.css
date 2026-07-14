@@ -25,15 +25,15 @@
   background: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
-/* Responded: soft green wash marking a prospect who has replied. After the
- * hover/focus rules so it wins on equal specificity; hover/focus deepen it
- * slightly rather than reverting to the neutral tint. */
-.row[data-responded] {
+/* Awaiting reply: soft green wash marking a prospect who replied and awaits your
+ * answer. After the hover/focus rules so it wins on equal specificity;
+ * hover/focus deepen it slightly rather than reverting to the neutral tint. */
+.row[data-awaiting-reply] {
   background: color-mix(in srgb, var(--stage-green) 8%, transparent);
 }
 
-.row[data-responded]:hover,
-.row[data-responded]:focus-within {
+.row[data-awaiting-reply]:hover,
+.row[data-awaiting-reply]:focus-within {
   background: color-mix(in srgb, var(--stage-green) 13%, transparent);
 }
 

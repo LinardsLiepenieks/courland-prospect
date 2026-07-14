@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::model::Prospect;
 
 const COLUMNS: &str =
-    "id, name, linkedin_url, headline, pitch_id, stage_id, messages_sent, responded, note, created_at";
+    "id, name, linkedin_url, headline, pitch_id, stage_id, messages_sent, awaiting_reply, note, created_at";
 
 /// Subquery yielding a pitch's messaging (first) stage id, or NULL if the pitch
 /// has no stages / is NULL. `?N` is the pitch_id bind position at the call site.

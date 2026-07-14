@@ -2,7 +2,7 @@ import type { ProspectViewProps } from "./ProspectsView";
 import { formatDate } from "../lib/date";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
-import { MessageCount, RespondedBadge, StageMenu } from "./ProspectControls";
+import { MessageCount, AwaitingReplyBadge, StageMenu } from "./ProspectControls";
 import styles from "./ProspectsList.module.css";
 
 /** Flat list view: one row per prospect with its stage, outreach counter (in the
@@ -23,7 +23,7 @@ export default function ProspectsList({
         const effectiveStage = effectiveStageId(p, stages, messagingStageId);
         const inMessaging = messagingStageId != null && effectiveStage === messagingStageId;
         return (
-          <li key={p.id} className={styles.row} data-responded={p.responded || undefined}>
+          <li key={p.id} className={styles.row} data-awaiting-reply={p.awaiting_reply || undefined}>
             <button
               type="button"
               className={styles.open}
@@ -40,7 +40,7 @@ export default function ProspectsList({
 
             <div className={styles.aside}>
               {inMessaging && <MessageCount value={p.messages_sent} />}
-              {p.responded && <RespondedBadge />}
+              {p.awaiting_reply && <AwaitingReplyBadge />}
               <StageMenu
                 stages={stages}
                 currentStageId={effectiveStage}

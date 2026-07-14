@@ -40,7 +40,8 @@ function reportCapture(res: Response<CaptureOutcome>): void {
  * Capture the messages in a conversation — both the ones you send and the
  * replies you receive — and hand them to the service worker (which durably
  * queues + delivers them). Each message carries its direction: outgoing bumps
- * the prospect's sent-count, an incoming reply marks them "responded".
+ * the prospect's sent-count; whichever message is newest decides whether they're
+ * "awaiting reply" (their reply is the latest, unanswered).
  *
  * Two triggers, both reusing the same scrape + post path:
  *  - SEND: a click on Send or Enter-to-send captures your just-sent message

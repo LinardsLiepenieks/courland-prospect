@@ -7,7 +7,7 @@
 //! over the loopback ingest server (`crate::ingest`), never through a Tauri
 //! command — which is why these are `pub(crate)`. This module is the single
 //! centralized writer of extension-derived prospect state: a prospect's
-//! `messages_sent` counter and its durable `responded` flag are both derived
+//! `messages_sent` counter and its dynamic `awaiting_reply` flag are both derived
 //! here (recomputed from the stored rows) rather than set by hand anywhere else.
 
 use std::collections::HashSet;
@@ -15,9 +15,10 @@ use std::collections::HashSet;
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// The captured direction of a message. Outgoing = you messaged the prospect
-/// (drives `messages_sent`); incoming = the prospect replied (drives `responded`).
-/// Anything not exactly `"incoming"` is normalized to outgoing when stored, so a
-/// missing/garbled value fails safe to the pre-existing behavior.
+/// (drives `messages_sent`); incoming = the prospect replied. The two together,
+/// ordered by capture, drive `awaiting_reply` (whether the newest message is
+/// incoming). Anything not exactly `"incoming"` is normalized to outgoing when
+/// stored, so a missing/garbled value fails safe to an outgoing message.
 pub(crate) const INCOMING: &str = "incoming";
 pub(crate) const OUTGOING: &str = "outgoing";
 
@@ -36,13 +37,14 @@ pub(crate) struct CapturedMessage<'a> {
 /// state, in one call so the caller (the ingest route) just deserializes, trims,
 /// and delegates. Returns `(stored, skipped)`.
 ///
-/// The gate depends on direction: an **outgoing** message counts only while the
-/// person is a prospect in their pitch's messaging stage (the outreach loop);
-/// an **incoming** reply counts for any existing prospect regardless of stage
-/// (a reply is meaningful wherever they are). Everything else (blank identity,
-/// unknown person, outgoing-but-advanced) is skipped — not an error. Derived
-/// state is recomputed once per touched prospect, not per row. Idempotent via
-/// `store`'s dedup, so replaying a batch never double-counts.
+/// The gate is uniform for both directions: a message is stored whenever its
+/// person is already a prospect, at any stage. Both facts we derive need it —
+/// an incoming reply is meaningful wherever they are, and we must record our
+/// **outgoing** answers wherever they are too, or `awaiting_reply` could never
+/// clear once a prospect advances past the messaging stage. Everything else
+/// (blank identity, unknown person) is skipped — not an error. Derived state is
+/// recomputed once per touched prospect, not per row. Idempotent via `store`'s
+/// dedup, so replaying a batch never double-counts.
 pub(crate) fn store_batch(
     conn: &Connection,
     items: &[CapturedMessage],
@@ -56,12 +58,7 @@ pub(crate) fn store_batch(
             skipped += 1;
             continue;
         }
-        let pid = if item.direction == INCOMING {
-            prospect_id_by_url(conn, item.linkedin_url)?
-        } else {
-            messaging_prospect_id(conn, item.linkedin_url)?
-        };
-        match pid {
+        match prospect_id_by_url(conn, item.linkedin_url)? {
             Some(pid) => {
                 store(conn, pid, item.li_key, item.body, item.sent_at, item.direction)?;
                 affected.insert(pid);
@@ -77,29 +74,10 @@ pub(crate) fn store_batch(
     Ok((stored, skipped))
 }
 
-/// The id of the prospect this message should attach to, or `None` to drop it.
-/// A message is only stored when the person is already a prospect **and** is
-/// currently sitting in their pitch's messaging stage — the two gates the
-/// feature counts against. Everything else (unknown person, advanced past
-/// messaging) resolves to `None` and the message is silently ignored.
-fn messaging_prospect_id(
-    conn: &Connection,
-    linkedin_url: &str,
-) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT p.id FROM prospects p
-         JOIN stages s ON s.id = p.stage_id
-         WHERE p.linkedin_url = ?1 AND s.kind = 'messaging'",
-        [linkedin_url],
-        |r| r.get(0),
-    )
-    .optional()
-}
-
 /// The id of the prospect with this `linkedin_url`, or `None` if the person
-/// isn't a prospect. The looser gate used for **incoming** replies: a reply
-/// counts for any existing prospect, at any stage (unlike outgoing, which is
-/// scoped to the messaging stage).
+/// isn't a prospect. The single storage gate for both directions: a message is
+/// stored for any existing prospect, at any stage. A non-prospect resolves to
+/// `None` and the message is silently ignored.
 fn prospect_id_by_url(conn: &Connection, linkedin_url: &str) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
         "SELECT id FROM prospects WHERE linkedin_url = ?1",
@@ -117,8 +95,9 @@ fn prospect_id_by_url(conn: &Connection, linkedin_url: &str) -> rusqlite::Result
 /// `direction` is set on first insert and deliberately **not** overwritten on
 /// conflict: a given `li_key` is one intrinsic message, so re-classification is
 /// only ever noise from a mid-render re-scrape. Letting a later scrape flip the
-/// stored direction would recompute `responded` back to false / skew
-/// `messages_sent` — the first capture (from a settled thread) wins instead.
+/// stored direction would wrongly flip `awaiting_reply` (e.g. mark a reply as
+/// answered) / skew `messages_sent` — the first capture (from a settled thread)
+/// wins instead.
 ///
 /// `body` and `sent_at` follow the same "a degraded re-scrape can't destroy a
 /// good capture" rule: an empty body or a missing `sent_at` on conflict keeps
@@ -148,8 +127,11 @@ fn store(
 
 /// Recompute a prospect's derived state from its stored messages — the single
 /// source of truth for both facts. `messages_sent` counts outgoing messages;
-/// `responded` is whether any incoming reply exists. Called once per affected
-/// prospect after storing a batch.
+/// `awaiting_reply` is whether the prospect's **newest** message is incoming
+/// (they replied and we haven't answered). "Newest" is the greatest `id`:
+/// insertion order tracks the extension's top-to-bottom (chronological) scrape,
+/// and later captures always insert higher. `COALESCE` keeps a prospect with no
+/// messages at 0. Called once per affected prospect after storing a batch.
 fn recompute_derived(conn: &Connection, prospect_id: i64) -> rusqlite::Result<()> {
     // Direction literals come from the module consts so this query can't drift
     // from `store`'s vocabulary.
@@ -158,9 +140,11 @@ fn recompute_derived(conn: &Connection, prospect_id: i64) -> rusqlite::Result<()
              messages_sent =
                  (SELECT count(*) FROM messages
                   WHERE prospect_id = ?1 AND direction = '{OUTGOING}'),
-             responded =
-                 EXISTS (SELECT 1 FROM messages
-                         WHERE prospect_id = ?1 AND direction = '{INCOMING}')
+             awaiting_reply = COALESCE(
+                 (SELECT direction = '{INCOMING}' FROM messages
+                  WHERE prospect_id = ?1
+                  ORDER BY id DESC LIMIT 1),
+                 0)
          WHERE id = ?1"
     );
     conn.execute(&sql, [prospect_id])?;
@@ -210,9 +194,9 @@ mod tests {
         .unwrap()
     }
 
-    fn responded(conn: &Connection, prospect_id: i64) -> bool {
+    fn awaiting_reply(conn: &Connection, prospect_id: i64) -> bool {
         conn.query_row(
-            "SELECT responded FROM prospects WHERE id = ?1",
+            "SELECT awaiting_reply FROM prospects WHERE id = ?1",
             [prospect_id],
             |r| r.get(0),
         )
@@ -224,25 +208,31 @@ mod tests {
         CapturedMessage { linkedin_url: url, li_key: key, body, sent_at: None, direction: OUTGOING }
     }
 
+    /// Convenience for the tests: build an incoming (reply) captured message.
+    fn incoming<'a>(url: &'a str, key: &'a str, body: &'a str) -> CapturedMessage<'a> {
+        CapturedMessage { linkedin_url: url, li_key: key, body, sent_at: None, direction: INCOMING }
+    }
+
     #[test]
-    fn resolves_prospect_only_when_in_messaging_stage() {
+    fn resolves_any_prospect_regardless_of_stage() {
         let conn = setup();
         let (pitch, stages) = seed_pitch_with_stages(&conn);
         let url = "https://li/ada";
         let id = seed_prospect(&conn, url, pitch, stages[0]); // messaging stage
 
-        assert_eq!(messaging_prospect_id(&conn, url).unwrap(), Some(id));
+        assert_eq!(prospect_id_by_url(&conn, url).unwrap(), Some(id));
 
-        // Advance past messaging → no longer resolvable.
+        // Advancing past messaging must NOT change resolution — the storage gate
+        // is uniform now, so our answers keep landing wherever the prospect sits.
         conn.execute(
             "UPDATE prospects SET stage_id = ?1 WHERE id = ?2",
             params![stages[1], id],
         )
         .unwrap();
-        assert_eq!(messaging_prospect_id(&conn, url).unwrap(), None);
+        assert_eq!(prospect_id_by_url(&conn, url).unwrap(), Some(id));
 
-        // Unknown URL → None.
-        assert_eq!(messaging_prospect_id(&conn, "https://li/nobody").unwrap(), None);
+        // Unknown URL → None (a non-prospect's messages are dropped).
+        assert_eq!(prospect_id_by_url(&conn, "https://li/nobody").unwrap(), None);
     }
 
     #[test]
@@ -279,7 +269,7 @@ mod tests {
         let batch = [
             out("https://li/ada", "k1", "one"),
             out("https://li/ada", "k2", "two"),
-            // Advanced prospect → skipped (not in messaging stage).
+            // Advanced prospect → stored now (the storage gate is stage-agnostic).
             out("https://li/grace", "k3", "x"),
             // Unknown person → skipped.
             out("https://li/nobody", "k4", "y"),
@@ -288,96 +278,84 @@ mod tests {
         ];
 
         let (stored, skipped) = store_batch(&conn, &batch).unwrap();
-        assert_eq!((stored, skipped), (2, 3));
+        assert_eq!((stored, skipped), (3, 2));
         assert_eq!(messages_sent(&conn, in_msg), 2);
-        assert_eq!(messages_sent(&conn, advanced), 0);
+        assert_eq!(messages_sent(&conn, advanced), 1);
 
         // Replaying the identical batch double-counts nothing (idempotent).
         let (stored2, _) = store_batch(&conn, &batch).unwrap();
-        assert_eq!(stored2, 2);
+        assert_eq!(stored2, 3);
         assert_eq!(messages_sent(&conn, in_msg), 2);
+        assert_eq!(messages_sent(&conn, advanced), 1);
     }
 
     #[test]
-    fn incoming_reply_sets_responded_at_any_stage_without_counting() {
+    fn incoming_reply_sets_awaiting_reply_at_any_stage() {
         let conn = setup();
         let (pitch, stages) = seed_pitch_with_stages(&conn);
         // A prospect who has been advanced past the messaging stage.
         let advanced = seed_prospect(&conn, "https://li/ada", pitch, stages[2]);
 
-        let batch = [
-            // Their reply — counts for responded even though they're not in messaging.
-            CapturedMessage {
-                linkedin_url: "https://li/ada",
-                li_key: "r1",
-                body: "sounds great",
-                sent_at: None,
-                direction: INCOMING,
-            },
-            // An outgoing message to the same advanced prospect is still skipped
-            // (outgoing is messaging-stage-gated), so messages_sent stays put.
-            out("https://li/ada", "o1", "following up"),
-            // A reply from a non-prospect → skipped.
-            CapturedMessage {
-                linkedin_url: "https://li/nobody",
-                li_key: "r2",
-                body: "who?",
-                sent_at: None,
-                direction: INCOMING,
-            },
-        ];
-
-        let (stored, skipped) = store_batch(&conn, &batch).unwrap();
-        assert_eq!((stored, skipped), (1, 2));
-        assert!(responded(&conn, advanced));
+        let (stored, skipped) = store_batch(
+            &conn,
+            &[
+                // Their reply — sets awaiting_reply even though they're not in messaging.
+                incoming("https://li/ada", "r1", "sounds great"),
+                // A reply from a non-prospect → skipped.
+                incoming("https://li/nobody", "r2", "who?"),
+            ],
+        )
+        .unwrap();
+        assert_eq!((stored, skipped), (1, 1));
+        assert!(awaiting_reply(&conn, advanced));
+        // An incoming reply is not an outgoing message, so the count stays put.
         assert_eq!(messages_sent(&conn, advanced), 0);
     }
 
     #[test]
-    fn outgoing_does_not_set_responded() {
+    fn awaiting_reply_clears_when_we_answer_and_toggles_back_on_the_next_reply() {
         let conn = setup();
         let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
+        // Advanced past messaging — the case the old messaging-stage gate broke:
+        // our answers must still be recorded so the flag can clear.
+        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[2]);
 
-        store_batch(&conn, &[out("https://li/ada", "k1", "hi")]).unwrap();
-        assert_eq!(messages_sent(&conn, id), 1);
-        assert!(!responded(&conn, id));
+        // We message first — newest is ours → not awaiting.
+        store_batch(&conn, &[out("https://li/ada", "o1", "hi there")]).unwrap();
+        assert!(!awaiting_reply(&conn, id));
 
-        // A later reply flips responded; the outgoing count is untouched.
-        store_batch(
-            &conn,
-            &[CapturedMessage {
-                linkedin_url: "https://li/ada",
-                li_key: "r1",
-                body: "hello back",
-                sent_at: None,
-                direction: INCOMING,
-            }],
-        )
-        .unwrap();
-        assert!(responded(&conn, id));
-        assert_eq!(messages_sent(&conn, id), 1);
+        // They reply — newest is theirs → awaiting.
+        store_batch(&conn, &[incoming("https://li/ada", "r1", "sounds good")]).unwrap();
+        assert!(awaiting_reply(&conn, id));
+
+        // We answer — newest is ours again → clears.
+        store_batch(&conn, &[out("https://li/ada", "o2", "great, let's talk")]).unwrap();
+        assert!(!awaiting_reply(&conn, id), "answering must clear awaiting_reply");
+        assert_eq!(messages_sent(&conn, id), 2, "both our messages count regardless of stage");
+
+        // They reply again — toggles back on.
+        store_batch(&conn, &[incoming("https://li/ada", "r2", "perfect")]).unwrap();
+        assert!(awaiting_reply(&conn, id), "a fresh reply re-sets awaiting_reply");
     }
 
     #[test]
-    fn rescrape_misclassifying_a_reply_cannot_unset_responded() {
+    fn rescrape_misclassifying_a_reply_cannot_unset_awaiting_reply() {
         let conn = setup();
         let (pitch, stages) = seed_pitch_with_stages(&conn);
-        // In the messaging stage, so a misclassified-outgoing re-scrape would
-        // still resolve to this prospect (the dangerous case).
         let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
 
-        // Their reply lands as incoming under a stable key.
+        // Their reply lands as incoming under a stable key and is the newest.
         store(&conn, id, "urn:msg:1", "yes let's talk", None, INCOMING).unwrap();
         recompute_derived(&conn, id).unwrap();
-        assert!(responded(&conn, id));
+        assert!(awaiting_reply(&conn, id));
 
         // A degraded re-scrape re-delivers the SAME key classified outgoing.
-        // Direction is fixed at first insert, so responded must stay true and the
-        // outgoing count must not gain this row.
+        // Direction is fixed at first insert, so the newest message stays incoming
+        // — awaiting_reply must NOT wrongly clear, and the reply isn't counted as
+        // one of our outgoing messages.
         store(&conn, id, "urn:msg:1", "yes let's talk", None, OUTGOING).unwrap();
         recompute_derived(&conn, id).unwrap();
-        assert!(responded(&conn, id), "a re-scrape must not un-set durable responded");
+        assert!(awaiting_reply(&conn, id), "a re-scrape must not wrongly clear awaiting_reply");
         assert_eq!(messages_sent(&conn, id), 0, "the reply must not be recounted as outgoing");
     }
 
@@ -435,8 +413,7 @@ mod tests {
         let canonical = "https://www.linkedin.com/in/ada-lovelace/";
         let id = seed_prospect(&conn, canonical, pitch, stages[0]); // messaging stage
 
-        // Exact canonical form resolves for both lookup paths.
-        assert_eq!(messaging_prospect_id(&conn, canonical).unwrap(), Some(id));
+        // Exact canonical form resolves via the single storage-gate lookup.
         assert_eq!(prospect_id_by_url(&conn, canonical).unwrap(), Some(id));
 
         // Near-miss variants of the same profile must NOT resolve — the backend

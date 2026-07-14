@@ -24,8 +24,8 @@
   color: var(--text);
 }
 
-/* ── Responded badge (read-only, durable) ────────────────── */
-.responded {
+/* ── Awaiting-reply badge (read-only) ────────────────── */
+.awaitingReply {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -40,7 +40,7 @@
   white-space: nowrap;
 }
 
-.responded svg {
+.awaitingReply svg {
   width: 13px;
   height: 13px;
   opacity: 0.9;

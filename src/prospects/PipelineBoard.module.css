@@ -97,11 +97,12 @@
     transform 120ms var(--ease-out);
 }
 
-/* Responded: a soft green wash signalling the prospect has replied. The stage's
- * colored left border stays untouched, so stage (border) and engagement (fill)
- * read as two separate channels. Washing in via the transition above means a
- * card turns green smoothly when a reply lands and the view live-refreshes. */
-.card[data-responded] {
+/* Awaiting reply: a soft green wash signalling the prospect replied and awaits
+ * your answer. The stage's colored left border stays untouched, so stage
+ * (border) and engagement (fill) read as two separate channels. Washing in via
+ * the transition above means a card turns green smoothly when a reply lands and
+ * the view live-refreshes — and clears again once you answer. */
+.card[data-awaiting-reply] {
   background: color-mix(in srgb, var(--stage-green) 8%, var(--surface));
 }
 
@@ -171,7 +172,7 @@
   margin-top: 2px;
 }
 
-/* Engagement tags (message count, responded) grouped left; stage menu sits right
+/* Engagement tags (message count, awaiting reply) grouped left; stage menu sits right
  * via the foot's space-between. Wraps as a unit when the card is narrow. */
 .cardTags {
   display: inline-flex;

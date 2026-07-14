@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("0011_drop_capture_profile.sql"),
     include_str!("0012_add_message_direction.sql"),
     include_str!("0013_create_snippets.sql"),
+    include_str!("0014_rename_responded_to_awaiting_reply.sql"),
 ];
 
 /// Apply every migration newer than the database's current `user_version`,
@@ -157,5 +158,75 @@ mod tests {
 
         // The old table name no longer exists.
         assert!(conn.query_row("SELECT 1 FROM product", [], |_| Ok(())).is_err());
+    }
+
+    /// The `responded` → `awaiting_reply` migration (0014) must both preserve the
+    /// column's data (RENAME COLUMN) and re-derive it to the new meaning: a
+    /// prospect is awaiting a reply when their newest stored message is incoming.
+    /// The stale pre-upgrade value must be recomputed, not carried over — so this
+    /// seeds deliberately wrong values and asserts the backfill overwrites them.
+    #[test]
+    fn awaiting_reply_migration_backfills_from_newest_message() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        // Apply everything up to (but not including) 0014 — it is index 13.
+        for sql in &MIGRATIONS[..13] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 13i64).unwrap();
+
+        // Three prospects as they'd exist at v13 (the column is still `responded`).
+        let seed = |conn: &Connection, url: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO prospects (name, linkedin_url) VALUES ('N', ?1)",
+                [url],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let awaiting = seed(&conn, "https://li/awaiting"); // newest incoming
+        let answered = seed(&conn, "https://li/answered"); // newest outgoing
+        let silent = seed(&conn, "https://li/silent"); // no messages
+
+        let msg = |conn: &Connection, pid: i64, key: &str, dir: &str| {
+            conn.execute(
+                "INSERT INTO messages (prospect_id, li_key, direction) VALUES (?1, ?2, ?3)",
+                rusqlite::params![pid, key, dir],
+            )
+            .unwrap();
+        };
+        // Insertion order == id order == chronology: the last-inserted is newest.
+        msg(&conn, awaiting, "a1", "outgoing");
+        msg(&conn, awaiting, "a2", "incoming");
+        msg(&conn, answered, "b1", "incoming");
+        msg(&conn, answered, "b2", "outgoing");
+
+        // Seed the OLD flag with values that contradict the new meaning, to prove
+        // the backfill recomputes rather than carrying the stale value forward.
+        conn.execute("UPDATE prospects SET responded = 0 WHERE id = ?1", [awaiting])
+            .unwrap();
+        conn.execute("UPDATE prospects SET responded = 1 WHERE id = ?1", [answered])
+            .unwrap();
+
+        // Upgrade across the rename + backfill (0014).
+        run(&mut conn).unwrap();
+
+        let flag = |conn: &Connection, id: i64| -> i64 {
+            conn.query_row(
+                "SELECT awaiting_reply FROM prospects WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(flag(&conn, awaiting), 1, "newest incoming → awaiting a reply");
+        assert_eq!(flag(&conn, answered), 0, "newest outgoing → not awaiting");
+        assert_eq!(flag(&conn, silent), 0, "no messages → not awaiting (COALESCE)");
+
+        // The old column name is gone (RENAME COLUMN, not a copy).
+        assert!(
+            conn.query_row("SELECT responded FROM prospects", [], |_| Ok(())).is_err(),
+            "the pre-rename column must no longer exist"
+        );
     }
 }

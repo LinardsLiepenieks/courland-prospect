@@ -16,10 +16,11 @@ export interface Prospect {
   /** Outreach counter shown in the messaging stage. Read-only: derived from
    *  messages the Chrome extension captures, not set by hand. */
   messages_sent: number;
-  /** Whether this prospect has ever replied to us. Durable and derived from
-   *  incoming replies the Chrome extension captures; a reply at any stage flips
-   *  it and it stays true. Drives the "Responded" treatment on their card. */
-  responded: boolean;
+  /** Whether this prospect has replied and we still owe them an answer — i.e.
+   *  their newest captured message is incoming. Dynamic and derived from messages
+   *  the Chrome extension captures: a reply at any stage sets it, and our answer
+   *  clears it. Drives the "Awaiting reply" treatment on their card. */
+  awaiting_reply: boolean;
   note: string;
   created_at: string;
 }

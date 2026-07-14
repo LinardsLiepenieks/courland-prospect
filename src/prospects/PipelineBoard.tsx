@@ -5,7 +5,7 @@ import type { ProspectViewProps } from "./ProspectsView";
 import { stageAccentStyle } from "../lib/stageColor";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
-import { MessageCount, RespondedBadge, StageMenu } from "./ProspectControls";
+import { MessageCount, AwaitingReplyBadge, StageMenu } from "./ProspectControls";
 import styles from "./PipelineBoard.module.css";
 
 /** Kanban board: one column per stage, cards dragged between columns to move a
@@ -138,7 +138,7 @@ function ProspectCard({
     <article
       className={styles.card}
       data-dragging={dragging || undefined}
-      data-responded={p.responded || undefined}
+      data-awaiting-reply={p.awaiting_reply || undefined}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = "move";
@@ -160,10 +160,10 @@ function ProspectCard({
       </div>
       {p.headline && <span className={styles.cardHeadline}>{p.headline}</span>}
       <div className={styles.cardFoot}>
-        {(showCount || p.responded) && (
+        {(showCount || p.awaiting_reply) && (
           <div className={styles.cardTags}>
             {showCount && <MessageCount value={p.messages_sent} />}
-            {p.responded && <RespondedBadge />}
+            {p.awaiting_reply && <AwaitingReplyBadge />}
           </div>
         )}
         <StageMenu

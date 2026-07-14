@@ -18,10 +18,11 @@ pub struct Prospect {
     pub stage_id: Option<i64>,
     /// Outreach counter shown in the messaging stage — how many messages sent.
     pub messages_sent: i64,
-    /// Whether the prospect has ever replied to us. Durable and derived from
-    /// captured incoming messages (see `features::messages`) — a reply at any
-    /// stage flips it, and it stays true afterward.
-    pub responded: bool,
+    /// Whether the prospect has replied and we still owe them an answer — i.e.
+    /// their newest captured message is incoming. Dynamic and derived from
+    /// captured messages (see `features::messages`): a reply at any stage sets
+    /// it, and our answer clears it again.
+    pub awaiting_reply: bool,
     pub note: String,
     pub created_at: String,
 }
@@ -37,7 +38,7 @@ impl Prospect {
             pitch_id: row.get("pitch_id")?,
             stage_id: row.get("stage_id")?,
             messages_sent: row.get("messages_sent")?,
-            responded: row.get("responded")?,
+            awaiting_reply: row.get("awaiting_reply")?,
             note: row.get("note")?,
             created_at: row.get("created_at")?,
         })

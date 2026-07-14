@@ -339,13 +339,13 @@ struct NewMessage {
     direction: String,
 }
 
-/// Record a batch of captured messages (both directions). An outgoing message
-/// is stored only if its person is a prospect in their pitch's messaging stage;
-/// an incoming reply is stored for any existing prospect at any stage. Anything
-/// else is silently skipped (not an error — the extension still clears it from
-/// its outbox). Idempotent via the messages repo's dedup, so replaying an
-/// offline-cached batch never double-counts. The whole batch commits atomically:
-/// a DB error rolls back and returns 500, so the extension safely retries.
+/// Record a batch of captured messages (both directions). A message of either
+/// direction is stored if its person is an existing prospect, at any stage;
+/// anything else (unknown person, blank identity) is silently skipped (not an
+/// error — the extension still clears it from its outbox). Idempotent via the
+/// messages repo's dedup, so replaying an offline-cached batch never
+/// double-counts. The whole batch commits atomically: a DB error rolls back and
+/// returns 500, so the extension safely retries.
 async fn create_messages(
     State(state): State<ServerState>,
     Json(items): Json<Vec<NewMessage>>,
