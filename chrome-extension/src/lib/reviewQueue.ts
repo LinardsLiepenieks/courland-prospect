@@ -34,14 +34,18 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Max review tabs loading at once — a margin at the ~5-tab point where LinkedIn
- *  starts failing to load new tabs. */
-const MAX_CONCURRENT = 5;
+/** Max review tabs loading at once. Kept well below the ~5-tab point where LinkedIn
+ *  starts failing to load new tabs: LinkedIn's throttling is behavioural (burst
+ *  volume + timing), so a low ceiling plus the wide gap below keeps a batch reading
+ *  as a human-paced trickle rather than an automated burst. */
+const MAX_CONCURRENT = 3;
 
-/** Jittered gap between opening tabs, so even a burst of ready drafts isn't a hard
- *  load burst and repeated runs don't settle into a fixed, detectable rhythm. */
-const OPEN_JITTER_MIN_MS = 500;
-const OPEN_JITTER_MAX_MS = 1500;
+/** Jittered gap between opening tabs. Deliberately wide so a batch of ready drafts
+ *  drips out over minutes instead of seconds — the burst signature, not a hard
+ *  numeric cap, is what LinkedIn's 2026 detection flags — and repeated runs never
+ *  settle into a fixed, detectable rhythm. */
+const OPEN_JITTER_MIN_MS = 3_000;
+const OPEN_JITTER_MAX_MS = 7_000;
 
 /** If work remains but nothing has opened in this long, assume an in-flight tab
  *  died without releasing its slot and open one anyway (stall backstop). Kept well
