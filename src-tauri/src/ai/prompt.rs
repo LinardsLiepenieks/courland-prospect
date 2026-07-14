@@ -205,6 +205,8 @@ phrasing — so any words you add are indistinguishable from the snippet text an
 whole reply reads in one consistent voice.
 - Write in the founder's voice (see the profile). Keep it concise, like a real \
 LinkedIn message. No greeting or sign-off boilerplate unless a snippet provides it.
+- Do not say \"that resonates\" (or variants like \"this resonates\" / \"really \
+resonates\"); reply to the prospect directly instead of using that filler.
 - Do not use em dashes or en dashes (\u{2014} or \u{2013}) anywhere in the reply, \
 including any inherited from the snippets; replace them with a plain hyphen (-) or \
 reword. Use a hyphen only when a dash is truly unavoidable.
