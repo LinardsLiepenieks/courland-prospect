@@ -81,22 +81,6 @@ export default function SnippetsSection({ pitchId }: Props) {
 
   return (
     <div className={styles.snippets}>
-      {snippets.length === 0 ? (
-        <p className={styles.empty}>
-          No snippets yet. Add one to start building a library.
-        </p>
-      ) : (
-        <ul className={styles.list}>
-          {snippets.map((s) => (
-            <li key={s.id}>
-              <SnippetCard snippet={s} onDelete={handleDelete} />
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {error && <div className={styles.error}>{error}</div>}
-
       <button
         type="button"
         className={styles.addBtn}
@@ -113,6 +97,28 @@ export default function SnippetsSection({ pitchId }: Props) {
         </svg>
         Add snippet
       </button>
+
+      {error && <div className={styles.error}>{error}</div>}
+
+      {snippets.length === 0 ? (
+        <p className={styles.empty}>
+          No snippets yet. Add one to start building a library.
+        </p>
+      ) : (
+        <ul className={styles.list}>
+          {snippets.map((s) => (
+            <li key={s.id}>
+              <SnippetCard snippet={s} onDelete={handleDelete} />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className={styles.hint}>
+        Wrap a blank in [brackets] — like <span className={styles.hintTag}>[first name]</span> or{" "}
+        <span className={styles.hintTag}>[what they mentioned]</span> — and the AI fills it from the
+        prospect and the conversation when drafting.
+      </p>
     </div>
   );
 }
@@ -214,7 +220,7 @@ function SnippetCard({
         className={styles.contentInput}
         value={content}
         onChange={(e) => setContent(e.target.value)}
-        placeholder="What this snippet says…"
+        placeholder="What this snippet says… use [brackets] for blanks the AI fills in, like [first name]"
         aria-label="Snippet content"
         disabled={deleting}
       />

@@ -174,18 +174,32 @@ kept as close to their original wording as possible.
 Rules:
 - Every fact, claim, offer, link, or commitment in your reply MUST come from the \
 SNIPPETS or PROFILE. Never invent details, names, numbers, or promises.
+- PLACEHOLDERS: a snippet may contain fill-in blanks written in [SQUARE BRACKETS] - \
+for example [FIRST NAME], [their company], or [what they mentioned]. Replace each \
+one, brackets included, with the specific detail it names, drawn ONLY from the \
+prospect's name, the profile, or the conversation above. This is the single case \
+where you supply a value that is not verbatim in a snippet, and it is still grounded: \
+never guess or invent what goes in a blank. If the detail a blank asks for is not \
+actually present in the name, profile, or conversation, do not fake it - reword the \
+sentence so it reads naturally without that detail, or drop that snippet and compose \
+from others. The final reply must NEVER contain a literal [ or ] placeholder marker.
 - Take into account any goal or objective stated in the pitch or profile (for \
 example, booking a meeting or driving a signup). Let it steer WHICH snippets you \
 choose and how you order and combine them, so the reply moves the conversation toward \
 that goal — but any actual ask or offer must still come from a snippet; never invent \
 one. If no snippet advances the goal, do not force it.
 - Build the reply by stitching the relevant snippets together and reusing their own \
-wording. Do NOT rewrite or paraphrase the snippets — make only the smallest edits \
-needed for the pieces to connect and read as one message. When more than one snippet \
-fits, prefer combining them over rewriting a single one.
-- Keep anything you write yourself to bridge or connect snippets as SHORT as \
-possible: each bridge at most FOUR words, and only when truly needed to join snippets \
-or answer the prospect. Prefer none.
+wording. The snippets stay verbatim - do NOT rewrite or paraphrase them; keep each \
+one as close to the original as possible. When more than one snippet fits, prefer \
+combining them over leaning on a single one.
+- You MAY write short connecting sentences of your own between snippets - to bridge \
+them, answer the prospect directly, or make the reply read as one natural message. \
+Keep anything you write this way brief (a short sentence or two at most) and \
+secondary: the snippets remain the substance of the reply, your own words only the \
+connective tissue. Read the pitch's skill above to understand what the founder is \
+selling and what they want out of this thread, and let that steer any sentence you \
+add so it stays on-message. Prefer fewer, shorter additions; when the snippets \
+connect cleanly on their own, add nothing.
 - Match the snippets' own language and style — their tone, vocabulary, formality, and \
 phrasing — so any words you add are indistinguishable from the snippet text and the \
 whole reply reads in one consistent voice.
@@ -270,9 +284,13 @@ mod tests {
 
         // Instruction rules survive.
         assert!(rendered.contains("ALL CAPS"));
-        assert!(rendered.contains("FOUR words"));
+        assert!(rendered.contains("short connecting sentences of your own"));
         assert!(rendered.contains("Match the snippets' own language and style"));
         assert!(rendered.contains("goal or objective"));
+        // Bracketed blanks in snippets are filled from context, never left literal.
+        assert!(rendered.contains("PLACEHOLDERS"));
+        assert!(rendered.contains("[SQUARE BRACKETS]"));
+        assert!(rendered.contains("NEVER contain a literal"));
         // Material + conversation are fenced as input.
         assert!(rendered.contains("--- INPUT ---"));
         assert!(rendered.contains("We build a CRM"));

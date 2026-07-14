@@ -192,6 +192,24 @@
   composes: error from "../styles/form.module.css";
 }
 
+/* ── Placeholder hint ────────────────────────────────────── */
+/* Quiet one-liner teaching the [bracket] fill-in feature; sits below the list
+   as a closing footnote so it reads as guidance, not chrome. */
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+/* Render the example tokens in mono so they read as literal text to type. */
+.hintTag {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* ── Add button ──────────────────────────────────────────── */
 .addBtn {
   display: inline-flex;
