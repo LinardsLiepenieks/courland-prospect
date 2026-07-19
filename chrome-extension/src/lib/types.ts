@@ -82,6 +82,27 @@ export interface DraftResult {
   draft: string;
 }
 
+/** A `{key: value}` map of LinkedIn-selector overrides (value = a CSS string or an
+ *  ordered fallback list). `GET /selectors` returns these; a heal response carries
+ *  the merged set. The content script merges them over its compiled defaults. */
+export type SelectorOverrides = Record<string, string | string[]>;
+
+/** One broken selector the content script reports to `POST /heal-selectors`:
+ *  the registry key, what it should find, and its current (broken) value. */
+export interface BrokenSelectorInput {
+  key: string;
+  description: string;
+  current: string;
+}
+
+/** What the content script sends the SW to repair stale selectors: the live page
+ *  HTML, the current URL (context), and the broken selectors. */
+export interface HealSelectorsPayload {
+  html: string;
+  url: string;
+  broken: BrokenSelectorInput[];
+}
+
 /** What became of an attempted capture, reported back so the content script can
  *  give immediate feedback:
  *   - `stored`  — recorded against a tracked prospect (outgoing count bumped, or
@@ -115,7 +136,9 @@ export type Request =
   | { type: "draftReply"; payload: DraftReplyPayload }
   | { type: "resetReviewQueue" }
   | { type: "openReviewTab"; payload: OpenReviewTabPayload }
-  | { type: "reviewTabFilled" };
+  | { type: "reviewTabFilled" }
+  | { type: "getSelectors" }
+  | { type: "healSelectors"; payload: HealSelectorsPayload };
 
 export type Response<T> =
   | { ok: true; data: T }

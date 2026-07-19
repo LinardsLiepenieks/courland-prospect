@@ -12,6 +12,7 @@
 //! the extension's origin. DB work runs in `spawn_blocking` (rusqlite blocks;
 //! the `std::sync::Mutex` guard is `!Send` so it can't cross an `.await`).
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -26,15 +27,25 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use super::security::{self, TOKEN_HEADER};
 use super::{gate, Heartbeat, IngestConfig};
-use crate::ai::{self, DraftContext, DraftMessage, Prompt};
+use crate::ai::{self, BrokenSelector, DraftContext, DraftMessage, Prompt};
 use crate::database::AppState;
-use crate::features::{messages, pitches, profile, prospects, snippets};
+use crate::features::{messages, pitches, profile, prospects, selectors, snippets};
 use crate::util::{MAX_NAME_LEN, MAX_TEXT_LEN};
 
 /// Ceiling on a single ingest request body. The largest legitimate payload is a
 /// batch of captured messages; this bounds a runaway/hostile body well above
 /// that while staying small enough that a bad request can't exhaust memory.
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Cap on the page HTML forwarded to a heal request. The prompt is fed to `claude`
+/// on stdin (not argv), so this isn't an OS command-line limit — it just bounds the
+/// prompt size (and the generation cost) to a sane ceiling; the extension also
+/// trims before sending.
+const MAX_HEAL_HTML: usize = 180_000;
+
+/// Cap on how many broken selectors one heal request may ask about — bounds the
+/// prompt size and a runaway/hostile body.
+const MAX_BROKEN: usize = 40;
 
 #[derive(Clone)]
 struct ServerState {
@@ -75,6 +86,8 @@ pub async fn serve(app: AppHandle, config: IngestConfig) {
         .route("/prospects", post(create_prospect))
         .route("/messages", post(create_messages))
         .route("/draft", post(draft_reply))
+        .route("/selectors", get(get_selectors))
+        .route("/heal-selectors", post(heal_selectors))
         // Guard is inner (runs after CORS), so CORS preflight is answered without
         // a token; real requests still pass the Host/token/Origin checks.
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -323,6 +336,200 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
     }
 }
 
+/// Serve the stored LinkedIn-selector overrides — a JSON object of `{key: value}`
+/// the extension merges over its compiled defaults at startup. `{}` when none
+/// have been healed yet. Reads only.
+async fn get_selectors(State(state): State<ServerState>) -> Response {
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        selectors::repository::get_overrides(&conn).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        // The stored blob is already a JSON object; parse it so we always emit
+        // valid JSON (fall back to `{}` if it were ever somehow malformed).
+        Ok(Ok(json)) => {
+            let value: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or_else(|_| serde_json::json!({}));
+            Json(value).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// One selector the extension reports as broken.
+#[derive(Deserialize)]
+struct BrokenIn {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    current: String,
+}
+
+/// Body the extension POSTs when a selector stops matching: the live page HTML and
+/// the broken selectors to repair. (The extension also sends a `url` for context;
+/// serde ignores unread fields, so it isn't declared here.)
+#[derive(Deserialize)]
+struct HealRequest {
+    #[serde(default)]
+    html: String,
+    #[serde(default)]
+    broken: Vec<BrokenIn>,
+}
+
+/// Repair stale LinkedIn selectors. Sends the live page HTML + the broken keys
+/// to the local Claude Code CLI (`crate::ai`), keeps only valid replacements for
+/// the requested keys, merges them into the stored overrides, and returns ONLY the
+/// keys healed this round (not the full merged map — see the response below). The
+/// extension applies them live. Writes the overrides; nothing else.
+async fn heal_selectors(State(state): State<ServerState>, Json(body): Json<HealRequest>) -> Response {
+    let broken_in = body.broken;
+    if broken_in.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no broken selectors given").into_response();
+    }
+    if broken_in.len() > MAX_BROKEN {
+        return (StatusCode::BAD_REQUEST, "too many selectors").into_response();
+    }
+    // Bound untrusted browser input before it goes into the heal prompt.
+    if broken_in.iter().any(|b| {
+        b.key.trim().is_empty()
+            || b.key.chars().count() > MAX_NAME_LEN
+            || b.description.chars().count() > MAX_TEXT_LEN
+            || b.current.chars().count() > MAX_TEXT_LEN
+    }) {
+        return (StatusCode::BAD_REQUEST, "selector field invalid or too long").into_response();
+    }
+
+    // Bound the HTML that goes into the heal prompt (fed to `claude` on stdin).
+    let html: String = body.html.chars().take(MAX_HEAL_HTML).collect();
+
+    let requested: HashSet<String> = broken_in.iter().map(|b| b.key.clone()).collect();
+    let broken: Vec<BrokenSelector> = broken_in
+        .into_iter()
+        .map(|b| BrokenSelector {
+            key: b.key,
+            description: b.description,
+            current: b.current,
+        })
+        .collect();
+
+    let raw = match ai::client::run_capped(Prompt::heal_selectors(&html, &broken)).await {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    let healed = parse_healed(&raw, &requested);
+    if healed.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Claude Code returned no usable selectors.",
+        )
+            .into_response();
+    }
+
+    // Respond with ONLY the keys healed this round. The extension gauges success by
+    // how many of the returned keys actually apply client-side; returning the full
+    // merged map (including unrelated pre-existing overrides) would let a heal that
+    // fixed nothing report success — and mark the still-broken key as done, blocking
+    // its retry. The merged map is still what we persist and serve at bootstrap.
+    let delta = serde_json::Value::Object(healed.clone());
+
+    // Merge the healed keys into the stored overrides and persist (one lock).
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        let current = selectors::repository::get_overrides(&conn).map_err(|e| e.to_string())?;
+        // Fail loud on a non-object blob rather than silently reducing it: writing a
+        // fresh map here would discard every prior override. (Unreachable in normal
+        // operation — every write serializes an object and the migration seeds `{}` —
+        // but the migrations contract is "never discard the user's data".)
+        let mut obj = match serde_json::from_str::<serde_json::Value>(&current) {
+            Ok(serde_json::Value::Object(m)) => m,
+            _ => {
+                return Err(
+                    "stored selector overrides are not a JSON object; refusing to overwrite"
+                        .to_string(),
+                )
+            }
+        };
+        for (k, v) in healed {
+            obj.insert(k, v);
+        }
+        let serialized = serde_json::to_string(&obj).map_err(|e| e.to_string())?;
+        selectors::repository::set_overrides(&conn, &serialized).map_err(|e| e.to_string())?;
+        Ok::<_, String>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => Json(serde_json::json!({ "selectors": delta })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Upper bound on a single healed selector value's length. A real CSS selector or
+/// class token is short; anything longer is model junk (prose, a pasted blob) and
+/// is rejected before it can be persisted.
+const MAX_SELECTOR_LEN: usize = 400;
+
+/// A conservative, syntax-agnostic sanity check on one healed selector value.
+/// Full CSS-validity checking needs a browser parser and stays client-side (the
+/// extension's `isValidCss`, the real oracle); this only rejects the obvious junk a
+/// confused model emits — empty, over-long, or containing characters (`{`, `}`,
+/// newlines) that never appear in a selector or class token — so garbage isn't
+/// persisted into the overrides blob. Values that pass here but aren't valid CSS
+/// are still filtered by the extension when it applies them.
+fn looks_like_selector(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.chars().count() <= MAX_SELECTOR_LEN && !t.contains(['{', '}', '\n', '\r'])
+}
+
+/// Extract the healed selector map from Claude's reply, keeping only requested
+/// keys whose value is a usable selector string, or a non-empty array of usable
+/// selector strings (see [`looks_like_selector`]). Tolerates a reply wrapped in
+/// prose or ```` ```json ```` fences by taking the outermost `{...}` object.
+fn parse_healed(
+    raw: &str,
+    requested: &HashSet<String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let slice = match (raw.find('{'), raw.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &raw[a..=b],
+        _ => return out,
+    };
+    let obj = match serde_json::from_str::<serde_json::Value>(slice) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => return out,
+    };
+    for (k, v) in obj {
+        if !requested.contains(&k) {
+            continue;
+        }
+        let usable = match &v {
+            serde_json::Value::String(s) => looks_like_selector(s),
+            serde_json::Value::Array(items) => {
+                !items.is_empty()
+                    && items.iter().all(
+                        |it| matches!(it, serde_json::Value::String(s) if looks_like_selector(s)),
+                    )
+            }
+            _ => false,
+        };
+        if usable {
+            out.insert(k, v);
+        }
+    }
+    out
+}
+
 /// One captured message the extension POSTs. `sent_at` is optional (LinkedIn
 /// doesn't always expose a scrapeable timestamp). `direction` distinguishes an
 /// outgoing message you sent from an incoming reply; it defaults to outgoing so
@@ -395,5 +602,76 @@ async fn create_messages(
         }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_healed;
+    use std::collections::HashSet;
+
+    fn requested(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_requested_string_and_array_values() {
+        let req = requested(&["composeRoot", "identityHeaders"]);
+        let raw = r#"{"composeRoot": ".foo", "identityHeaders": ["a", "b"]}"#;
+        let out = parse_healed(raw, &req);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out["composeRoot"], serde_json::json!(".foo"));
+        assert_eq!(out["identityHeaders"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn tolerates_prose_and_code_fences_around_the_object() {
+        let req = requested(&["composeRoot"]);
+        let raw = "Sure! Here you go:\n```json\n{\"composeRoot\": \".foo\"}\n```\nHope that helps.";
+        let out = parse_healed(raw, &req);
+        assert_eq!(out["composeRoot"], serde_json::json!(".foo"));
+    }
+
+    #[test]
+    fn drops_unrequested_keys_and_invalid_values() {
+        let req = requested(&["composeRoot", "messageItem"]);
+        // sneaky: an unrequested key, an empty string, an array with a non-string,
+        // an empty array, and a nested object — all must be rejected.
+        let raw = r#"{
+            "composeRoot": ".ok",
+            "evilKey": ".nope",
+            "messageItem": "",
+            "identityHeaders": ["a", 3],
+            "x": [],
+            "y": {"nested": true}
+        }"#;
+        let out = parse_healed(raw, &req);
+        assert_eq!(out.len(), 1, "only the one valid, requested key survives");
+        assert_eq!(out["composeRoot"], serde_json::json!(".ok"));
+    }
+
+    #[test]
+    fn empty_on_garbage_or_non_object() {
+        let req = requested(&["composeRoot"]);
+        assert!(parse_healed("not json at all", &req).is_empty());
+        assert!(parse_healed("[1, 2, 3]", &req).is_empty());
+        assert!(parse_healed("", &req).is_empty());
+    }
+
+    #[test]
+    fn rejects_structurally_junk_selector_values() {
+        let req = requested(&["composeRoot", "sendButtonClasses"]);
+        // A value carrying braces (a pasted rule / prose blob) and one with a newline
+        // are not selectors — both must be dropped, even though they're non-empty.
+        let raw = r#"{
+            "composeRoot": ".msg-form { color: red }",
+            "sendButtonClasses": ["ok-button", "line one\nline two"]
+        }"#;
+        let out = parse_healed(raw, &req);
+        assert!(out.is_empty(), "brace/newline values are not usable selectors");
+
+        // A real attribute selector (with brackets and quotes) is fine.
+        let ok = parse_healed(r#"{"composeRoot": "[class~=\"msg-form\"]"}"#, &req);
+        assert_eq!(ok["composeRoot"], serde_json::json!("[class~=\"msg-form\"]"));
     }
 }

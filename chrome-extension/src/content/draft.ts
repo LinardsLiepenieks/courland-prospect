@@ -31,6 +31,7 @@ import {
 } from "./linkedin";
 import { friendlyError, send } from "./bridge";
 import { el } from "./dom";
+import { IDENTITY_KEYS, requestHeal, THREAD_KEYS } from "./heal";
 import { showToast } from "./toast";
 import { hideDraftOverlay, showDraftOverlay } from "./overlay";
 import { delay } from "../lib/delay";
@@ -226,11 +227,22 @@ export async function runCycle(
   await clearDrafts();
   await send({ type: "resetReviewQueue" });
 
+  // Preflight: on the messaging inbox with no conversation rows resolvable, the
+  // thread-row selector has likely rotated — every index would read as "end of
+  // list" and the batch would silently draft nothing. Heal it before walking the
+  // list. (A genuinely empty inbox also lands here; `requestHeal` caps and dedups,
+  // so the cost is one bounded attempt.)
+  if (topThreadRows(1).length === 0) await requestHeal(THREAD_KEYS);
+
   let ready = 0;
   let failed = 0;
   // Conversations that rendered but never confirmed as open, back to back. A few in
   // a row means something structural changed rather than isolated lag — bail then.
   let consecutiveUnconfirmed = 0;
+  // One-shot heal of the thread-list selectors when the streak hits the cap: that's
+  // the active-row / thread-row markers having rotated, not lag. Retry once, then
+  // give up if it's still broken.
+  let healedThreadSelectors = false;
   const pending: Promise<void>[] = [];
   const tick = (done: boolean): void => report({ ready, failed, done });
 
@@ -245,14 +257,30 @@ export async function runCycle(
     // a row fail, which is structural (e.g. an active-row class rename), not lag.
     if (outcome === "unconfirmed") {
       failed += 1;
-      if (++consecutiveUnconfirmed >= MAX_CONSECUTIVE_UNCONFIRMED) break;
+      if (++consecutiveUnconfirmed >= MAX_CONSECUTIVE_UNCONFIRMED) {
+        // Structural: try healing the thread-list selectors once, then retry this
+        // same index with the new ones rather than aborting the whole batch.
+        if (!healedThreadSelectors && (await requestHeal(THREAD_KEYS))) {
+          healedThreadSelectors = true;
+          consecutiveUnconfirmed = 0;
+          failed -= 1; // this index is being retried, not skipped
+          i -= 1;
+          continue;
+        }
+        break;
+      }
       tick(false);
       continue;
     }
     consecutiveUnconfirmed = 0;
 
-    const thread = resolvePersonThread();
+    let thread = resolvePersonThread();
     const url = currentThreadUrl();
+    // Thread confirmed open but no resolvable person → the identity selectors have
+    // likely rotated. Heal once and retry the resolve before skipping this one.
+    if (!thread && (await requestHeal(IDENTITY_KEYS))) {
+      thread = resolvePersonThread();
+    }
     if (!thread || !url) {
       failed += 1;
       tick(false);

@@ -5,6 +5,18 @@
 // here — update the selectors, keep the fallbacks.
 
 import type { CapturedMessage, MessageDirection } from "../lib/types";
+import { selList, selStr } from "./selectors";
+
+/** True when a conversation is actually OPEN — a thread URL, or a rendered message
+ *  stream. This is the signal that a compose form SHOULD exist: if none is found
+ *  here, the compose selectors have likely rotated (vs. the inbox list, where no
+ *  composer is expected). */
+export function threadIsOpen(): boolean {
+  return (
+    location.pathname.includes("/messaging/thread/") ||
+    document.querySelector(selStr("messageList")) !== null
+  );
+}
 
 /** A person resolved from an open conversation. */
 export interface Identity {
@@ -27,7 +39,7 @@ export type IdentityResult =
  * `<form>`-anchored detection missed them entirely.
  */
 export function findComposeRoots(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('[class~="msg-form"]'));
+  return Array.from(document.querySelectorAll<HTMLElement>(selStr("composeRoot")));
 }
 
 /**
@@ -36,10 +48,7 @@ export function findComposeRoots(): HTMLElement[] {
  * "was this a send?" for a button that may have been re-rendered since mount.
  */
 export function looksLikeSend(b: HTMLButtonElement): boolean {
-  if (
-    b.matches(".msg-form__send-button, .msg-form__send-btn, .msg-form__send-toggle") ||
-    b.matches('button[type="submit"]')
-  ) {
+  if (b.matches(selStr("sendButtonClasses")) || b.matches(selStr("sendSubmit"))) {
     return true;
   }
   const text = (b.textContent ?? "").trim().toLowerCase();
@@ -53,12 +62,10 @@ export function looksLikeSend(b: HTMLButtonElement): boolean {
  * classes → a submit button → any button labelled "send" (text or aria-label).
  */
 export function findSendButton(root: HTMLElement): HTMLButtonElement | null {
-  const byClass = root.querySelector<HTMLButtonElement>(
-    ".msg-form__send-button, .msg-form__send-btn, .msg-form__send-toggle",
-  );
+  const byClass = root.querySelector<HTMLButtonElement>(selStr("sendButtonClasses"));
   if (byClass) return byClass;
 
-  const submit = root.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submit = root.querySelector<HTMLButtonElement>(selStr("sendSubmit"));
   if (submit) return submit;
 
   return Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find(looksLikeSend) ?? null;
@@ -92,11 +99,9 @@ function rootChildContaining(node: HTMLElement, root: HTMLElement): HTMLElement 
  *     so the button is never lost when selectors drift.
  */
 export function findComposeAnchor(root: HTMLElement): ComposeAnchor | null {
-  const footer = root.querySelector<HTMLElement>('[class~="msg-form__footer"]');
+  const footer = root.querySelector<HTMLElement>(selStr("composeFooter"));
 
-  const editable = root.querySelector<HTMLElement>(
-    '[contenteditable="true"], [role="textbox"]',
-  );
+  const editable = root.querySelector<HTMLElement>(selStr("composeEditable"));
   if (editable) {
     const container = rootChildContaining(editable, root);
     // If the footer lives *inside* this container, inserting after it would land
@@ -118,22 +123,16 @@ export function findComposeAnchor(root: HTMLElement): ComposeAnchor | null {
  *  with a junk name). We anchor to an explicit conversation container, or failing
  *  that the nearest ancestor that also encloses THIS thread's message stream. */
 export function conversationScope(sendBtn: Element): Element {
-  const explicit = sendBtn.closest(
-    [
-      ".msg-overlay-conversation-bubble",
-      '[class*="msg-overlay-conversation"]',
-      ".msg-convo-wrapper",
-      ".msg-thread",
-    ].join(","),
-  );
+  const explicit = sendBtn.closest(selStr("convoExplicit"));
   if (explicit) return explicit;
 
   // The open conversation is the tightest ancestor that also holds the message
   // stream — never the sidebar (it has no message list) and tighter than `main`
   // whenever an intermediate wrapper exists.
+  const messageList = selStr("messageList");
   let el: Element | null = sendBtn.parentElement;
   while (el) {
-    if (el.querySelector('[class*="msg-s-message-list"]')) return el;
+    if (el.querySelector(messageList)) return el;
     el = el.parentElement;
   }
   return sendBtn.closest("form") ?? sendBtn.ownerDocument.body;
@@ -201,16 +200,8 @@ function slugName(url: string): string {
  *  the sidebar conversation list and the message stream itself. Reading these was
  *  the capture bug — the sidebar's first lockup won, so identity became whoever
  *  sat atop the list rather than who the thread is actually with. */
-const NON_IDENTITY = [
-  '[class*="msg-conversations-container"]',
-  '[class*="conversation-listitem"]',
-  '[class*="msg-overlay-list-bubble"]',
-  '[class*="msg-s-message-list"]',
-  '[class*="msg-s-event-listitem"]',
-].join(",");
-
 function inNonIdentity(el: Element): boolean {
-  return el.closest(NON_IDENTITY) !== null;
+  return el.closest(selStr("nonIdentity")) !== null;
 }
 
 /** Distinct normalized profile URLs → the anchor first seen for each, from links
@@ -228,12 +219,8 @@ function distinctProfiles(links: HTMLAnchorElement[]): Map<string, HTMLAnchorEle
  *  the thread header, then the anchor's aria-label, then its text — each run
  *  through {@link cleanText} — and finally the URL slug. Never the lockup blob. */
 function nameFrom(anchor: HTMLAnchorElement, url: string): string {
-  const header = anchor.closest(
-    '[class*="msg-title-bar"], [class*="msg-entity-lockup"], [class*="msg-thread"], [class*="overlay-conversation"]',
-  );
-  const titleNode = header?.querySelector(
-    'h2, [class*="entity-title"], [class*="title-bar__title"], [class*="thread__title"]',
-  );
+  const header = anchor.closest(selStr("nameHeaderContainer"));
+  const titleNode = header?.querySelector(selStr("nameTitleNode"));
   for (const raw of [
     titleNode?.textContent ?? "",
     anchor.getAttribute("aria-label") ?? "",
@@ -247,20 +234,13 @@ function nameFrom(anchor: HTMLAnchorElement, url: string): string {
 
 /**
  * Identify who an open conversation is with, reading ONLY the thread header —
- * never the sidebar list or the message stream (see {@link NON_IDENTITY}). A 1:1
+ * never the sidebar list or the message stream (the `nonIdentity` selector). A 1:1
  * thread resolves to exactly one distinct profile; more than one means a group we
  * can't attribute to a single prospect; none means we couldn't tell.
  */
 export function identify(scope: Element): IdentityResult {
-  const headerSelectors = [
-    "a.msg-thread__link-to-profile",
-    "a.msg-connection-card__link",
-    '[class*="msg-title-bar"] a[href*="/in/"]',
-    '[class*="msg-entity-lockup"] a[href*="/in/"]',
-    '[class*="overlay-conversation"] a[href*="/in/"]',
-  ];
-  for (const sel of headerSelectors) {
-    const links = Array.from(scope.querySelectorAll<HTMLAnchorElement>(sel)).filter(
+  for (const headerSel of selList("identityHeaders")) {
+    const links = Array.from(scope.querySelectorAll<HTMLAnchorElement>(headerSel)).filter(
       (a) => !inNonIdentity(a),
     );
     const byUrl = distinctProfiles(links);
@@ -272,7 +252,7 @@ export function identify(scope: Element): IdentityResult {
   }
 
   // Fallback: any profile link in scope that isn't in the sidebar list or stream.
-  const links = Array.from(scope.querySelectorAll<HTMLAnchorElement>('a[href*="/in/"]')).filter(
+  const links = Array.from(scope.querySelectorAll<HTMLAnchorElement>(selStr("profileLink"))).filter(
     (a) => !inNonIdentity(a),
   );
   const byUrl = distinctProfiles(links);
@@ -294,9 +274,7 @@ export function identify(scope: Element): IdentityResult {
  *  URL. Re-query per step (don't cache the whole set): the list can re-render on
  *  navigation and invalidate stale node references. */
 export function topThreadRows(n: number): HTMLElement[] {
-  return Array.from(
-    document.querySelectorAll<HTMLElement>('[class*="msg-conversation-listitem__link"]'),
-  ).slice(0, n);
+  return Array.from(document.querySelectorAll<HTMLElement>(selStr("threadRow"))).slice(0, n);
 }
 
 /** The current conversation's canonical URL when the messaging pane is on a
@@ -339,7 +317,7 @@ export function activateRow(row: HTMLElement): void {
  *  can't false-positive. Lets the drafter confirm the intended thread actually
  *  opened before writing into it. */
 export function isRowActive(row: HTMLElement): boolean {
-  return row.className.includes("convo-item-link--active");
+  return row.className.includes(selStr("activeRowToken"));
 }
 
 /** The list position of the conversation currently open in the reading pane —
@@ -360,8 +338,8 @@ export function selectedRowIndex(): number {
  *  churn; the test id is steadier), with a class-substring fallback. */
 export function inboxTopBar(): HTMLElement | null {
   return (
-    document.querySelector<HTMLElement>("[data-test-msg-cross-pillar-inbox-top-bar-wrapper]") ??
-    document.querySelector<HTMLElement>('[class*="inbox-top-bar-wrapper__container"]')
+    document.querySelector<HTMLElement>(selStr("inboxTopBarPrimary")) ??
+    document.querySelector<HTMLElement>(selStr("inboxTopBarFallback"))
   );
 }
 
@@ -370,9 +348,7 @@ export function inboxTopBar(): HTMLElement | null {
  *  a new row directly *after* this, so it sits at the bottom of the header,
  *  right above the thread list. */
 export function inboxFilterRow(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(
-    '[class*="msg-conversations-container__title-row"]',
-  );
+  return document.querySelector<HTMLElement>(selStr("inboxFilterRow"));
 }
 
 /** Whether a thread's composer already holds user-entered text — so the drafter
@@ -381,9 +357,7 @@ export function inboxFilterRow(): HTMLElement | null {
  *  editor `writeComposer` targets; strips zero-width/NBSP so only real visible
  *  text counts (an empty composer's `textContent` is empty/whitespace). */
 export function composerHasText(root: HTMLElement): boolean {
-  const editable = root.querySelector<HTMLElement>(
-    '[contenteditable="true"], [role="textbox"]',
-  );
+  const editable = root.querySelector<HTMLElement>(selStr("composeEditable"));
   const text = (editable?.textContent ?? "").replace(/[\u200B-\u200D\uFEFF\u00A0]/g, "").trim();
   return text.length > 0;
 }
@@ -397,9 +371,7 @@ export function composerHasText(root: HTMLElement): boolean {
  *  the tab is focused, since execCommand acts on the active document. Never
  *  sends. */
 export function writeComposer(root: HTMLElement, text: string): boolean {
-  const editable = root.querySelector<HTMLElement>(
-    '[contenteditable="true"], [role="textbox"]',
-  );
+  const editable = root.querySelector<HTMLElement>(selStr("composeEditable"));
   if (!editable) return false;
 
   editable.focus();
@@ -431,11 +403,6 @@ export function writeComposer(root: HTMLElement, text: string): boolean {
 // rendered in the thread and classify each as sent-by-YOU or a reply. Everything
 // here is best-effort and must never throw into the page.
 
-const MESSAGE_ITEM = ".msg-s-event-listitem";
-/** LinkedIn's own modifier marking the *counterparty's* messages. */
-const OTHER_MODIFIER = "msg-s-event-listitem--other";
-const MESSAGE_BODY = ".msg-s-event-listitem__body";
-
 /** Stable, order-independent fallback key (djb2 → hex) for when no DOM id/urn is
  *  present. Keyed on content + timestamp so a re-scrape of the same message
  *  produces the same key and dedups. */
@@ -448,11 +415,10 @@ function hashKey(input: string): string {
 /** The profile URL of a message's sender, if one is discoverable — used to
  *  classify direction when LinkedIn's `--other` class is absent. */
 function senderUrl(item: Element): string | null {
+  const profileLink = selStr("profileLink");
   const link =
-    item.querySelector<HTMLAnchorElement>('a[href*="/in/"]') ??
-    item
-      .closest('.msg-s-message-group, li[class*="msg-s-message-list__event"]')
-      ?.querySelector<HTMLAnchorElement>('a[href*="/in/"]') ??
+    item.querySelector<HTMLAnchorElement>(profileLink) ??
+    item.closest(selStr("messageGroup"))?.querySelector<HTMLAnchorElement>(profileLink) ??
     null;
   return link ? normalizeProfileUrl(link.getAttribute("href") ?? "") : null;
 }
@@ -483,13 +449,15 @@ function messageTimestamp(item: Element): string | null {
  */
 export function scrapeMessages(scope: Element, partnerUrl: string): CapturedMessage[] {
   const out: CapturedMessage[] = [];
-  for (const item of Array.from(scope.querySelectorAll<HTMLElement>(MESSAGE_ITEM))) {
+  const otherModifier = selStr("messageOtherModifier");
+  const bodySel = selStr("messageBody");
+  for (const item of Array.from(scope.querySelectorAll<HTMLElement>(selStr("messageItem")))) {
     const sender = senderUrl(item);
     const isIncoming =
-      item.classList.contains(OTHER_MODIFIER) || (sender != null && sender === partnerUrl);
+      item.classList.contains(otherModifier) || (sender != null && sender === partnerUrl);
     const direction: MessageDirection = isIncoming ? "incoming" : "outgoing";
 
-    const body = (item.querySelector(MESSAGE_BODY)?.textContent ?? "")
+    const body = (item.querySelector(bodySel)?.textContent ?? "")
       .replace(/\s+/g, " ")
       .trim();
     if (!body) continue;

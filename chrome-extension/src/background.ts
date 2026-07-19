@@ -146,6 +146,23 @@ async function handle(msg: Request): Promise<Response<unknown>> {
       void releaseReviewSlot();
       return { ok: true, data: null };
     }
+    if (msg.type === "getSelectors") {
+      // Persisted LinkedIn-selector overrides the content script merges over its
+      // defaults at startup. Empty `{}` when nothing's been healed.
+      const res = await call("/selectors");
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      return { ok: true, data: await res.json() };
+    }
+    if (msg.type === "healSelectors") {
+      // A selector broke — hand the live page to the app so Claude Code can repair
+      // it; returns the merged overrides for the content script to apply.
+      const res = await call("/heal-selectors", {
+        method: "POST",
+        body: JSON.stringify(msg.payload),
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      return { ok: true, data: await res.json() };
+    }
     // queueMessages — durably queue first (so a closed app never loses a
     // capture), then attempt an immediate targeted delivery of THESE items so we
     // can report a precise outcome for the toast. On success clear them and kick

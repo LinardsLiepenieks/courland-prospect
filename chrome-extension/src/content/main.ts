@@ -10,9 +10,12 @@ import {
   findSendButton,
   inboxFilterRow,
   inboxTopBar,
+  threadIsOpen,
 } from "./linkedin";
 import { buildWidget } from "./widget";
 import { buildDraftControl, isFillTab, runFillMode } from "./draft";
+import { bootstrapSelectors, MOUNT_KEYS, requestHeal } from "./heal";
+import { selStr } from "./selectors";
 
 // If this tab was opened by the review-tab queue, it carries the `#cpfill` marker
 // so it can pre-fill the cached draft. Captured once at load (before we clear the
@@ -22,6 +25,39 @@ const fillTab = isFillTab();
 function inject(): void {
   injectComposeWidgets();
   injectDraftControl();
+  checkComposeMount();
+}
+
+// A compose surface is "healthy" only if we can find a compose root AND resolve a
+// send button inside it — so a rotated send-button selector (root found, button
+// not) counts as broken too, not just a missing root. `findSendButton` already
+// falls back to text/aria, so a false negative here means the selectors really did
+// drift.
+function composeSurfacesHealthy(): boolean {
+  const roots = findComposeRoots();
+  return roots.length > 0 && roots.some((r) => findSendButton(r) !== null);
+}
+
+// Mount preflight: if a conversation is OPEN and has a composer editor but we can't
+// find a healthy compose surface, the compose/send selectors have likely rotated.
+// Confirm it's not just a mid-load flicker by re-checking after a delay, then heal
+// and re-inject once it lands. Gated on an actual editor being present so read-only
+// threads (InMail teasers, blocked, "conversation unavailable") — which legitimately
+// have no composer — don't trigger a spurious heal. `requestHeal` dedups and caps.
+let mountProbe: number | undefined;
+function composerExpected(): boolean {
+  return threadIsOpen() && document.querySelector(selStr("composeEditable")) !== null;
+}
+function checkComposeMount(): void {
+  window.clearTimeout(mountProbe);
+  if (!composerExpected() || composeSurfacesHealthy()) return;
+  mountProbe = window.setTimeout(() => {
+    if (composerExpected() && !composeSurfacesHealthy()) {
+      void requestHeal(MOUNT_KEYS).then((healed) => {
+        if (healed) schedule();
+      });
+    }
+  }, 3000);
 }
 
 function injectComposeWidgets(): void {
@@ -122,6 +158,10 @@ document.addEventListener("visibilitychange", () => {
 });
 checkin();
 
+// Load any persisted selector overrides (from prior self-heals) before the first
+// inject, then re-run once they land. The immediate schedule() below still mounts
+// on the compiled defaults so there's no wait on the happy path.
+void bootstrapSelectors().then(schedule);
 schedule();
 
 // Fill mode: this tab was opened by the review-tab queue (tagged via the `#cpfill`

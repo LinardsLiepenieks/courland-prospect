@@ -12,6 +12,8 @@ import {
 } from "./linkedin";
 import { friendlyError, send } from "./bridge";
 import { el } from "./dom";
+import { IDENTITY_KEYS, MESSAGE_KEYS, requestHeal } from "./heal";
+import { selStr } from "./selectors";
 import { showToast, type ToastKind } from "./toast";
 import { LAST_PITCH_KEY } from "../lib/storageKeys";
 import type { AddProspectResult, CaptureOutcome, Pitch, Response } from "../lib/types";
@@ -82,9 +84,19 @@ function setupCapture(composeRoot: HTMLElement): { resync: () => void } {
     url: string,
     opts: { explicit: boolean; finalPass: boolean },
   ): Promise<void> {
-    let fresh = scrapeMessages(scope, url).filter((m) => !sent.has(m.li_key));
+    const all = scrapeMessages(scope, url);
+    let fresh = all.filter((m) => !sent.has(m.li_key));
     if (!opts.finalPass) fresh = fresh.filter((m) => m.li_key.startsWith("urn:"));
-    if (fresh.length === 0) return;
+    if (fresh.length === 0) {
+      // An explicit send that scraped NOTHING — not even the message we just sent —
+      // means the message selectors rotated. Heal, then re-scrape with the new ones.
+      if (opts.finalPass && opts.explicit && all.length === 0) {
+        void requestHeal(MESSAGE_KEYS, scope).then((healed) => {
+          if (healed) backfill();
+        });
+      }
+      return;
+    }
     const res = await send<CaptureOutcome>({
       type: "queueMessages",
       payload: { linkedin_url: url, messages: fresh },
@@ -120,10 +132,16 @@ function setupCapture(composeRoot: HTMLElement): { resync: () => void } {
   }
 
   // A send happened here. Resolve identity NOW (the header is present before the
-  // message renders); fail safe + visible on ambiguity, else capture on render.
-  function onSend(): void {
+  // message renders); fail safe + visible on ambiguity, else capture on render. An
+  // `unknown` result on a real send is a strong signal the identity selectors
+  // rotated — heal and retry once before giving up, mirroring the "Add to Prospects"
+  // path so this automatic capture route self-heals too.
+  async function onSend(): Promise<void> {
     const scope = currentScope();
-    const who = identify(scope);
+    let who = identify(scope);
+    if (who.kind === "unknown" && (await requestHeal(IDENTITY_KEYS, scope))) {
+      who = identify(scope);
+    }
     if (who.kind !== "person") {
       showToast("error", "Couldn't identify this chat — message not tracked.");
       return;
@@ -147,13 +165,13 @@ function setupCapture(composeRoot: HTMLElement): { resync: () => void } {
     composeRoot.dataset.cpSendHooked = "1";
     composeRoot.addEventListener("click", (e) => {
       const btn = (e.target as Element | null)?.closest<HTMLButtonElement>("button");
-      if (btn && looksLikeSend(btn)) onSend();
+      if (btn && looksLikeSend(btn)) void onSend();
     });
     composeRoot.addEventListener("keydown", (e) => {
       // LinkedIn sends on Enter; Shift+Enter is a newline. Only within the editor.
       if (e.key !== "Enter" || e.shiftKey) return;
       const target = e.target as Element | null;
-      if (target?.closest('[contenteditable="true"], [role="textbox"], textarea')) onSend();
+      if (target?.closest(`${selStr("composeEditable")}, textarea`)) void onSend();
     });
     // main.ts fires this on SPA navigation (thread open/switch) so an already-
     // mounted widget re-scrapes the newly-visible thread for incoming replies.
@@ -258,13 +276,18 @@ export function buildWidget(sendBtn: Element): HTMLElement {
   // Start capturing messages you send in this conversation. Capture is keyed off
   // the compose form (stable across LinkedIn's re-renders), not our widget row.
   const composeRoot =
-    (sendBtn.closest('[class~="msg-form"]') as HTMLElement | null) ??
+    (sendBtn.closest(selStr("composeRoot")) as HTMLElement | null) ??
     (sendBtn.parentElement as HTMLElement | null) ??
     (scope as HTMLElement);
   const capture = setupCapture(composeRoot);
 
   button.addEventListener("click", async () => {
-    const result = identify(scope);
+    let result = identify(scope);
+    // An explicit add that can't find the person (but isn't a group) is a strong
+    // signal the identity selectors rotated — heal, then retry identify once.
+    if (result.kind === "unknown" && (await requestHeal(IDENTITY_KEYS, scope))) {
+      result = identify(scope);
+    }
     if (result.kind !== "person") {
       showFeedback(
         "error",

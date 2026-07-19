@@ -8,5 +8,6 @@ pub mod messages;
 pub mod pitches;
 pub mod profile;
 pub mod prospects;
+pub mod selectors;
 pub mod snippets;
 pub mod stages;
