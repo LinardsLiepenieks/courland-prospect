@@ -33,9 +33,26 @@ pub(crate) struct CapturedMessage<'a> {
     pub direction: &'a str,
 }
 
+/// A genuinely new (first-seen) outgoing message, surfaced by [`store_batch`] for
+/// downstream snippet proposal. Excludes re-scrapes/replays (deduped away) and
+/// incoming replies — so the proposer only ever analyzes text the user actually
+/// just sent for the first time.
+pub(crate) struct NewOutgoing {
+    pub prospect_id: i64,
+    pub body: String,
+}
+
+/// The result of storing a batch: the counts the HTTP response reports, plus the
+/// genuinely-new outgoing messages the caller fires snippet proposal on.
+pub(crate) struct StoreOutcome {
+    pub stored: usize,
+    pub skipped: usize,
+    pub new_outgoing: Vec<NewOutgoing>,
+}
+
 /// Store a whole captured batch and refresh the affected prospects' derived
 /// state, in one call so the caller (the ingest route) just deserializes, trims,
-/// and delegates. Returns `(stored, skipped)`.
+/// and delegates.
 ///
 /// The gate is uniform for both directions: a message is stored whenever its
 /// person is already a prospect, at any stage. Both facts we derive need it —
@@ -45,12 +62,16 @@ pub(crate) struct CapturedMessage<'a> {
 /// (blank identity, unknown person) is skipped — not an error. Derived state is
 /// recomputed once per touched prospect, not per row. Idempotent via `store`'s
 /// dedup, so replaying a batch never double-counts.
+///
+/// `new_outgoing` collects the first-seen outgoing messages (checked *before* the
+/// upsert, so a replay reports none): the seam the snippet proposer hangs off of.
 pub(crate) fn store_batch(
     conn: &Connection,
     items: &[CapturedMessage],
-) -> rusqlite::Result<(usize, usize)> {
+) -> rusqlite::Result<StoreOutcome> {
     let mut stored = 0usize;
     let mut skipped = 0usize;
+    let mut new_outgoing = Vec::new();
     let mut affected = HashSet::new();
 
     for item in items {
@@ -60,7 +81,20 @@ pub(crate) fn store_batch(
         }
         match prospect_id_by_url(conn, item.linkedin_url)? {
             Some(pid) => {
+                // Detect a first-seen message before the upsert (which can't tell
+                // insert from update apart). Only fresh, non-blank OUTGOING text is
+                // worth proposing snippets from.
+                let is_new = !message_exists(conn, pid, item.li_key)?;
                 store(conn, pid, item.li_key, item.body, item.sent_at, item.direction)?;
+                if is_new && item.direction != INCOMING {
+                    let body = item.body.trim();
+                    if !body.is_empty() {
+                        new_outgoing.push(NewOutgoing {
+                            prospect_id: pid,
+                            body: body.to_string(),
+                        });
+                    }
+                }
                 affected.insert(pid);
                 stored += 1;
             }
@@ -71,7 +105,19 @@ pub(crate) fn store_batch(
     for pid in &affected {
         recompute_derived(conn, *pid)?;
     }
-    Ok((stored, skipped))
+    Ok(StoreOutcome { stored, skipped, new_outgoing })
+}
+
+/// Whether a message with this `(prospect_id, li_key)` is already stored — the
+/// insert-vs-update discriminator `store`'s upsert can't provide on its own.
+fn message_exists(conn: &Connection, prospect_id: i64, li_key: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM messages WHERE prospect_id = ?1 AND li_key = ?2",
+        params![prospect_id, li_key],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|found| found.is_some())
 }
 
 /// The id of the prospect with this `linkedin_url`, or `None` if the person
@@ -277,14 +323,18 @@ mod tests {
             out("", "k5", "z"),
         ];
 
-        let (stored, skipped) = store_batch(&conn, &batch).unwrap();
-        assert_eq!((stored, skipped), (3, 2));
+        let out = store_batch(&conn, &batch).unwrap();
+        assert_eq!((out.stored, out.skipped), (3, 2));
         assert_eq!(messages_sent(&conn, in_msg), 2);
         assert_eq!(messages_sent(&conn, advanced), 1);
+        // All three stored messages are first-seen outgoing → all surface.
+        assert_eq!(out.new_outgoing.len(), 3);
 
-        // Replaying the identical batch double-counts nothing (idempotent).
-        let (stored2, _) = store_batch(&conn, &batch).unwrap();
-        assert_eq!(stored2, 3);
+        // Replaying the identical batch double-counts nothing (idempotent) and
+        // surfaces NO new outgoing — every message already exists.
+        let out2 = store_batch(&conn, &batch).unwrap();
+        assert_eq!(out2.stored, 3);
+        assert!(out2.new_outgoing.is_empty(), "a replay proposes nothing new");
         assert_eq!(messages_sent(&conn, in_msg), 2);
         assert_eq!(messages_sent(&conn, advanced), 1);
     }
@@ -296,7 +346,7 @@ mod tests {
         // A prospect who has been advanced past the messaging stage.
         let advanced = seed_prospect(&conn, "https://li/ada", pitch, stages[2]);
 
-        let (stored, skipped) = store_batch(
+        let out = store_batch(
             &conn,
             &[
                 // Their reply — sets awaiting_reply even though they're not in messaging.
@@ -306,7 +356,9 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!((stored, skipped), (1, 1));
+        assert_eq!((out.stored, out.skipped), (1, 1));
+        // An incoming reply is never proposal material.
+        assert!(out.new_outgoing.is_empty(), "incoming replies don't surface as new outgoing");
         assert!(awaiting_reply(&conn, advanced));
         // An incoming reply is not an outgoing message, so the count stays put.
         assert_eq!(messages_sent(&conn, advanced), 0);

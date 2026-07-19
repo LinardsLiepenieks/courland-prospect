@@ -38,6 +38,19 @@ pub(crate) fn exists(conn: &Connection, linkedin_url: &str) -> rusqlite::Result<
     .map(|found| found.is_some())
 }
 
+/// The pitch a prospect is running, or `None` when the prospect has no pitch (or
+/// doesn't exist). Used by the snippet proposer to route a proposal to the right
+/// pitch's library — a prospect with no pitch has no library to propose into.
+pub(crate) fn pitch_id(conn: &Connection, prospect_id: i64) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT pitch_id FROM prospects WHERE id = ?1",
+        [prospect_id],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+}
+
 pub(crate) fn list(conn: &Connection) -> rusqlite::Result<Vec<Prospect>> {
     let sql = format!("SELECT {COLUMNS} FROM prospects ORDER BY created_at DESC, id DESC");
     let mut stmt = conn.prepare(&sql)?;

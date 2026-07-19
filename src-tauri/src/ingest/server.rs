@@ -275,9 +275,21 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         let conn = st.conn.lock().map_err(|e| e.to_string())?;
         let pitch = pitches::repository::get(&conn, pitch_id).map_err(|e| e.to_string())?;
         let profile = profile::repository::get(&conn).map_err(|e| e.to_string())?;
+        // Approved snippets only — an unreviewed proposal must never leak into a
+        // drafted reply.
         let mut snippets =
-            snippets::repository::list(&conn, Some(pitch_id)).map_err(|e| e.to_string())?;
-        snippets.extend(snippets::repository::list(&conn, None).map_err(|e| e.to_string())?);
+            snippets::repository::list_approved(&conn, Some(pitch_id)).map_err(|e| e.to_string())?;
+        snippets.extend(snippets::repository::list_approved(&conn, None).map_err(|e| e.to_string())?);
+        // Each scope came back position-sorted, but the concatenation isn't — sort
+        // the merged set so the model composes the reply in conversation-arc order
+        // (openers → closers). `total_cmp` is a stable total order over the floats.
+        snippets.sort_by(|a, b| a.position.total_cmp(&b.position));
+        // Copying a snippet across the pitch/profile boundary can leave the same
+        // line in both scopes; drop exact-content duplicates (case/space-insensitive)
+        // so a copied line isn't presented to the model twice. The set is already
+        // position-sorted, so `retain` keeps the earliest (lowest-position) instance.
+        let mut seen = std::collections::HashSet::new();
+        snippets.retain(|s| seen.insert(s.content.trim().to_lowercase()));
         Ok::<_, String>((pitch, profile, snippets))
     })
     .await;
@@ -586,19 +598,23 @@ async fn create_messages(
         let st = app.state::<AppState>();
         let mut conn = st.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
-        let counts = messages::repository::store_batch(&tx, &batch).map_err(|e| e.to_string())?;
+        let outcome = messages::repository::store_batch(&tx, &batch).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        Ok::<_, String>(counts)
+        Ok::<_, String>(outcome)
     })
     .await;
 
     match result {
-        Ok(Ok((stored, skipped))) => {
+        Ok(Ok(outcome)) => {
             // Only nudge the UI when something actually landed.
-            if stored > 0 {
+            if outcome.stored > 0 {
                 let _ = state.app.emit(PROSPECTS_CHANGED, ());
             }
-            Json(serde_json::json!({ "stored": stored, "skipped": skipped })).into_response()
+            // Analyze genuinely-new outgoing messages for reusable snippets, off the
+            // response path (fire-and-forget) so the extension's outbox clears now.
+            snippets::proposals::spawn(state.app.clone(), outcome.new_outgoing);
+            Json(serde_json::json!({ "stored": outcome.stored, "skipped": outcome.skipped }))
+                .into_response()
         }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

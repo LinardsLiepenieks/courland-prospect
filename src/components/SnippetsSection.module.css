@@ -27,18 +27,24 @@
 }
 
 /* ── Card ────────────────────────────────────────────────── */
+/* Shared shell for both the editable and the proposed card: the box metrics and
+   entrance are identical; each variant layers on its own surface/border/motion. */
+.cardShell {
+  padding: 12px 14px;
+  border-radius: 12px;
+  animation: enterUp 240ms var(--ease-out) both;
+}
+
 /* A "note" card: borderless fields inside, so the whole card is the focus
    surface — it lights up on focus-within rather than each field boxing itself. */
 .card {
-  padding: 12px 14px;
+  composes: cardShell;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
   transition:
     border-color 150ms var(--ease-out),
     box-shadow 150ms var(--ease-out),
     opacity 150ms var(--ease-out);
-  animation: enterUp 240ms var(--ease-out) both;
 }
 
 .card:focus-within {
@@ -54,11 +60,96 @@
 .cardHead {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-/* Name reads as the card's title — no chrome until you're in it, with a hairline
-   that keeps rows aligned (always present so focus adds no layout shift). */
+/* ── Collapsed header (the whole left region is the expand toggle) ───────── */
+.headToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 3px 0;
+  background: transparent;
+  border: none;
+  text-align: left;
+  outline: none;
+}
+
+.headToggle:disabled {
+  opacity: 0.5;
+}
+
+/* Chevron: the persistent disclosure control, rotating 90° when open. */
+.chevronBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  outline: none;
+  transition: transform 160ms var(--ease-out);
+}
+
+.chevronBtn[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+
+.chevronBtn:hover:not(:disabled) {
+  color: var(--text-muted);
+}
+
+.chevronBtn:disabled {
+  opacity: 0.5;
+}
+
+.chevronBtn:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* The name, shown as the card's title while collapsed. */
+.titleText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleText[data-untitled] {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+/* Compact, read-only echo of the category on a collapsed row (the editable chip
+   lives in the expanded body). */
+.miniCat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  max-width: 40%;
+  padding: 2px 8px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Name field, shown when expanded — no chrome until you're in it. */
 .nameInput {
   flex: 1;
   min-width: 0;
@@ -66,7 +157,6 @@
   color: var(--text);
   background: transparent;
   border: none;
-  border-bottom: 1px solid transparent;
   font-size: 14px;
   font-weight: 600;
   outline: none;
@@ -75,6 +165,24 @@
 .nameInput::placeholder {
   color: var(--text-faint);
   font-weight: 500;
+}
+
+/* ── Collapsible body ────────────────────────────────────── */
+/* The 0fr → 1fr grid trick animates height without measuring: the inner track
+   clips its overflow, so the content slides open/closed. */
+.bodyWrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms var(--ease-out);
+}
+
+.bodyWrap[data-expanded="true"] {
+  grid-template-rows: 1fr;
+}
+
+.bodyInner {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .contentInput {
@@ -95,9 +203,8 @@
   color: var(--text-faint);
 }
 
-/* ── Delete affordance ───────────────────────────────────── */
-/* Quiet icon until intent; a tap swaps in the Cancel / Delete confirm. */
-.removeBtn {
+/* ── Actions menu button (⋯) ─────────────────────────────── */
+.menuBtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -114,13 +221,68 @@
     transform 140ms var(--ease-out);
 }
 
-.removeBtn:hover {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
+.menuBtn:hover:not(:disabled),
+.menuBtn[aria-expanded="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
-.removeBtn:active {
+.menuBtn:active:not(:disabled) {
   transform: scale(0.92);
+}
+
+.menuBtn:disabled {
+  opacity: 0.5;
+}
+
+/* ── Menu label / divider / empty (inside the Popover) ───── */
+.menuLabel {
+  padding: 5px 10px 3px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.menuEmpty {
+  padding: 3px 10px 6px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.menuDivider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* ── Transient action flash ("Copied to X") ──────────────── */
+.flash {
+  flex-shrink: 0;
+  overflow: hidden;
+  max-width: 55%;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  animation: flashIn 160ms var(--ease-out) both;
+}
+
+.flash[data-kind="err"] {
+  color: var(--danger);
+}
+
+@keyframes flashIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .confirm {
@@ -173,12 +335,229 @@
   background: color-mix(in srgb, var(--danger) 88%, #000);
 }
 
+/* ── Proposed card ───────────────────────────────────────── */
+/* An AI-proposed snippet awaiting review. Amber, warm, "look at me but not
+   alarming" — distinct from the blue focus accent and the red danger. Read-only:
+   the verbatim guarantee means there's nothing to edit until it's approved. */
+.proposed {
+  composes: cardShell;
+  --proposed: var(--stage-amber);
+  background: color-mix(in srgb, var(--proposed) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--proposed) 38%, var(--border));
+  /* A thin left bar reinforces "new / pending" without shouting. */
+  border-left: 3px solid var(--proposed);
+  transition: opacity 150ms var(--ease-out);
+}
+
+/* Dim while an approve/reject request is in flight. */
+.proposed[data-busy="true"] {
+  opacity: 0.5;
+}
+
+.proposedHead {
+  composes: cardHead;
+}
+
+.proposedBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 2px 7px 2px 6px;
+  color: color-mix(in srgb, var(--proposed) 88%, var(--text));
+  background: color-mix(in srgb, var(--proposed) 16%, transparent);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.proposedName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposedContent {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  /* Preserve the sender's own line breaks — it's a verbatim quote. */
+  white-space: pre-wrap;
+}
+
+.proposedFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.proposedHint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposedActions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.rejectBtn,
+.approveBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.rejectBtn:active:not(:disabled),
+.approveBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.rejectBtn:disabled,
+.approveBtn:disabled {
+  opacity: 0.5;
+}
+
+/* Reject is the quiet, reversible-by-re-sending choice — keep it low-key. */
+.rejectBtn {
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.rejectBtn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border-strong));
+}
+
+/* Approve is the primary action — solid accent, matching the app's primary
+   buttons, with a check to read as "confirm". */
+.approveBtn {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: 1px solid transparent;
+}
+
+.approveBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 /* ── Card footer / errors ────────────────────────────────── */
 .cardFoot {
   display: flex;
-  justify-content: flex-end;
-  min-height: 18px;
-  margin-top: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+  margin-top: 8px;
+}
+
+/* ── Category chip (the manual override) ─────────────────── */
+.categoryChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 60%;
+  padding: 3px 9px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.categoryChip:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+}
+
+.categoryChip:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.categoryChip:disabled {
+  opacity: 0.5;
+}
+
+/* Empty state reads as a quiet "add" affordance, not a filled tag. */
+.categoryChip[data-empty="true"] {
+  color: var(--text-faint);
+  background: transparent;
+  border-color: var(--border-strong);
+  border-style: dashed;
+  font-weight: 500;
+}
+
+/* A filled dot marks a hand-picked category; hollow = AI-suggested. */
+.categoryDot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Hollow dot = AI-suggested category; filled = hand-picked. Shared by the
+   collapsed mini-pill and the expanded editable chip. */
+.categoryChip[data-manual="false"] .categoryDot,
+.miniCat[data-manual="false"] .categoryDot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.chipError {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--danger);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.categoryInput {
+  min-width: 0;
+  max-width: 60%;
+  padding: 3px 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  box-shadow: var(--focus-ring);
+  font-size: 12px;
+  font-weight: 550;
+  outline: none;
 }
 
 .cardError {
@@ -246,15 +625,27 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card {
+  .card,
+  .proposed,
+  .flash {
     animation: none;
+  }
+  .card {
     transition:
       border-color 150ms var(--ease-out),
       box-shadow 150ms var(--ease-out);
   }
-  .removeBtn:active,
+  /* Snap the collapsible and chevron rather than sliding/rotating. */
+  .bodyWrap,
+  .chevronBtn {
+    transition: none;
+  }
+  .menuBtn:active:not(:disabled),
   .secondaryBtn:active:not(:disabled),
   .deleteBtn:active:not(:disabled),
+  .rejectBtn:active:not(:disabled),
+  .approveBtn:active:not(:disabled),
+  .categoryChip:active:not(:disabled),
   .addBtn:active:not(:disabled) {
     transform: none;
   }
