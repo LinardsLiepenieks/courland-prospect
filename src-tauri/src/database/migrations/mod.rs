@@ -26,6 +26,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("0012_add_message_direction.sql"),
     include_str!("0013_create_snippets.sql"),
     include_str!("0014_rename_responded_to_awaiting_reply.sql"),
+    include_str!("0015_create_selectors.sql"),
+    include_str!("0016_add_snippet_status.sql"),
+    include_str!("0017_add_snippet_position_category.sql"),
 ];
 
 /// Apply every migration newer than the database's current `user_version`,
@@ -228,5 +231,49 @@ mod tests {
             conn.query_row("SELECT responded FROM prospects", [], |_| Ok(())).is_err(),
             "the pre-rename column must no longer exist"
         );
+    }
+
+    /// The position/category/manual migration (0017) must backfill every
+    /// pre-existing snippet in place: mid-arc position (0.5), no category, not
+    /// manual — non-destructive, like the status column before it. Guards against a
+    /// future edit to 0017 that would fail to default existing rows (which would
+    /// break every snippet read, since `from_row` expects the columns non-NULL).
+    #[test]
+    fn position_category_migration_backfills_existing_snippets() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        // Apply everything up to (but not including) 0017 — it is index 16.
+        for sql in &MIGRATIONS[..16] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 16i64).unwrap();
+
+        // A snippet as it'd exist at v16 (status column present; the three new
+        // columns not yet). A NULL pitch_id (profile scope) needs no pitch row.
+        conn.execute(
+            "INSERT INTO snippets (name, content) VALUES ('Intro', 'saw your post')",
+            [],
+        )
+        .unwrap();
+
+        // Upgrade across 0017.
+        run(&mut conn).unwrap();
+
+        let (position, category, manual): (f64, String, i64) = conn
+            .query_row(
+                "SELECT position, category, manual FROM snippets WHERE name = 'Intro'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(position, 0.5, "existing row backfills to mid-arc");
+        assert_eq!(category, "", "existing row backfills to uncategorized");
+        assert_eq!(manual, 0, "existing row backfills to non-manual");
+
+        // The content is untouched — the migration is non-destructive.
+        let content: String = conn
+            .query_row("SELECT content FROM snippets WHERE name = 'Intro'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(content, "saw your post");
     }
 }
