@@ -2,16 +2,19 @@
 //!
 //! We shell out to the `claude` binary in headless print mode (`claude -p`)
 //! instead of hitting an HTTP API: this reuses the user's own Claude Code
-//! install and auth, with no API key to manage. The user text is passed as a
-//! process argument (no shell), so it can't be interpreted as a command.
+//! install and auth, with no API key to manage. The prompt is fed on the child's
+//! stdin (no shell), so it can't be interpreted as a command — and, unlike an argv
+//! argument, it isn't bounded by the OS command-line length limit (Windows'
+//! `CreateProcessW` caps that at 32,767 chars, which a page-HTML heal prompt blows
+//! straight past).
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, TryAcquireError};
 
 use super::prompt::Prompt;
 
@@ -57,15 +60,15 @@ pub fn is_available() -> bool {
 
 /// Run a prompt through Claude Code and return its trimmed text output.
 ///
-/// Blocking — spawns `claude -p <prompt>` and waits (with a [`TIMEOUT`]). Call it
-/// off the UI thread (e.g. via `spawn_blocking`) so a slow generation doesn't
-/// freeze the app.
+/// Blocking — spawns `claude -p`, feeds the prompt on stdin, and waits (with a
+/// [`TIMEOUT`]). Call it off the UI thread (e.g. via `spawn_blocking`) so a slow
+/// generation doesn't freeze the app.
 pub fn run(prompt: &Prompt) -> Result<String, String> {
     let claude = find_claude();
+    let rendered = prompt.render();
     let mut child = Command::new(&claude)
         .arg("-p")
-        .arg(prompt.render())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -75,6 +78,17 @@ pub fn run(prompt: &Prompt) -> Result<String, String> {
             eprintln!("ai: failed to spawn {}: {e}", claude.display());
             GENERIC_ERROR.to_string()
         })?;
+
+    // Feed the prompt on stdin from its own thread: a large prompt can fill the
+    // pipe buffer, and writing it inline would block us before we start draining
+    // stdout (a deadlock). Dropping the handle closes stdin → EOF, so `claude`
+    // stops waiting for more input. A write failure (e.g. the process already
+    // exited) is ignored here; the exit-status / empty-output checks below surface
+    // it as the one friendly error.
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(rendered.as_bytes());
+    });
 
     // Drain stdout on a separate thread so a large output can't deadlock against
     // a full pipe buffer while we're time-waiting on the process.
@@ -138,6 +152,31 @@ pub async fn run_capped(prompt: Prompt) -> Result<String, String> {
             eprintln!("ai: draft task panicked: {e}");
             GENERIC_ERROR.to_string()
         })?
+}
+
+/// Run a prompt through Claude Code for BACKGROUND, best-effort work — like
+/// proposing snippets from a captured message — without ever making an interactive
+/// caller wait. Unlike [`run_capped`], which queues on [`Semaphore::acquire`], this
+/// uses `try_acquire`: if no CLI permit is immediately free it returns `Ok(None)`
+/// and does nothing. Because a background task never joins the permit queue, a
+/// user-facing draft/polish `acquire` can never sit behind a backlog of background
+/// generations (tokio's semaphore is FIFO-fair, so a queued background waiter would
+/// otherwise take the next permit ahead of a later foreground one). The dropped
+/// pass is harmless — the caller re-proposes on the user's next action.
+pub async fn run_capped_background(prompt: Prompt) -> Result<Option<String>, String> {
+    let _permit = match limiter().try_acquire() {
+        Ok(p) => p,
+        // No spare capacity right now — yield to foreground work and skip this pass.
+        Err(TryAcquireError::NoPermits) => return Ok(None),
+        Err(TryAcquireError::Closed) => return Err(GENERIC_ERROR.to_string()),
+    };
+    tokio::task::spawn_blocking(move || run(&prompt))
+        .await
+        .map_err(|e| {
+            eprintln!("ai: background task panicked: {e}");
+            GENERIC_ERROR.to_string()
+        })?
+        .map(Some)
 }
 
 /// Shared plumbing for every feature's "polish" command: trim the input, reject

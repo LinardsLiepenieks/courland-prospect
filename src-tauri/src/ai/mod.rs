@@ -15,4 +15,6 @@ pub mod client;
 pub mod commands;
 pub mod prompt;
 
-pub use prompt::{DraftContext, DraftMessage, Prompt};
+pub use prompt::{
+    BrokenSelector, ClassifyContext, DraftContext, DraftMessage, Prompt, ProposeContext,
+};
