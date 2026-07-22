@@ -357,7 +357,14 @@ export function inboxFilterRow(): HTMLElement | null {
  *  editor `writeComposer` targets; strips zero-width/NBSP so only real visible
  *  text counts (an empty composer's `textContent` is empty/whitespace). */
 export function composerHasText(root: HTMLElement): boolean {
-  const editable = root.querySelector<HTMLElement>(selStr("composeEditable"));
+  return hasVisibleText(root.querySelector<HTMLElement>(selStr("composeEditable")));
+}
+
+/** Whether an editable holds real, visible text \u2014 ignoring the zero-width and
+ *  NBSP characters an "empty" rich editor (LinkedIn's composer or comment box)
+ *  can leave behind. Shared by the message-composer and comment-box checks so the
+ *  non-obvious strip regex lives in one place. */
+function hasVisibleText(editable: HTMLElement | null): boolean {
   const text = (editable?.textContent ?? "").replace(/[\u200B-\u200D\uFEFF\u00A0]/g, "").trim();
   return text.length > 0;
 }
@@ -373,7 +380,17 @@ export function composerHasText(root: HTMLElement): boolean {
 export function writeComposer(root: HTMLElement, text: string): boolean {
   const editable = root.querySelector<HTMLElement>(selStr("composeEditable"));
   if (!editable) return false;
+  return writeIntoEditable(editable, text);
+}
 
+/** Drive `text` into a contenteditable so the page's own framework registers the
+ *  change: focus, select all, then `execCommand("insertText")` (which dispatches
+ *  the beforeinput/input events a rich editor like LinkedIn's ProseMirror depends
+ *  on — a raw `textContent` set does not). Falls back to a direct set + input
+ *  event, reporting success only if the text actually landed. Shared by the
+ *  message composer and the comment box; the caller runs it only once the tab is
+ *  focused (execCommand acts on the active document). Never sends. */
+function writeIntoEditable(editable: HTMLElement, text: string): boolean {
   editable.focus();
   const sel = window.getSelection();
   if (sel) {
@@ -382,20 +399,442 @@ export function writeComposer(root: HTMLElement, text: string): boolean {
     sel.removeAllRanges();
     sel.addRange(range);
   }
-  // Replace the (now-selected) contents with the draft. execCommand dispatches the
-  // beforeinput/input events LinkedIn's editor depends on.
   const inserted = document.execCommand("insertText", false, text);
   if (inserted) return true;
 
-  // Fallback for the day execCommand finally goes away: set text and dispatch a
-  // best-effort input event so the framework still sees a change. Report success
-  // only if the text actually landed in the DOM — so a write that didn't take
-  // surfaces an error rather than a false "Draft ready".
   editable.textContent = text;
   editable.dispatchEvent(
     new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }),
   );
-  return editable.textContent === text;
+  // Compare with ALL whitespace stripped: a rich editor (ProseMirror) wraps newlines
+  // in <p> blocks, so a multi-line comment's `textContent` ("line1line2") never
+  // equals the source ("line1\nline2") verbatim — a literal `=== text` check would
+  // report a false failure on any multi-line text that actually landed correctly.
+  const strip = (v: string): string => v.replace(/\s+/g, "");
+  return strip(editable.textContent ?? "") === strip(text);
+}
+
+// ── Posts & comments (the LinkedIn commenter) ────────────────────────────────
+// Reading posts from the feed / a profile's recent-activity, and placing a
+// drafted comment into a post's comment box. Same fragility rules as the rest of
+// this file — layered, fail-quiet, selectors centralized + healable.
+
+/** The activity URN carried on a post container (`urn:li:activity:…`, or a
+ *  `ugcPost`/`share` variant), read from its `data-urn`/`data-id` attribute or a
+ *  descendant carrying one. `null` when none is present. */
+function postUrn(container: HTMLElement): string | null {
+  const re = /urn:li:(?:activity|ugcPost|share):\d+/;
+  for (const attr of ["data-urn", "data-id"]) {
+    const own = container.getAttribute(attr)?.match(re);
+    if (own) return own[0];
+    // Scan ALL descendants carrying this attr, not just the first: the first
+    // `data-urn` under a container can be a non-post URN (a member/comment), while
+    // a deeper element carries the real post URN — inspecting only the first would
+    // miss it and drop an otherwise-commentable post.
+    for (const el of Array.from(container.querySelectorAll(`[${attr}*="urn:li:"]`))) {
+      const m = el.getAttribute(attr)?.match(re);
+      if (m) return m[0];
+    }
+  }
+  return null;
+}
+
+/** The canonical permalink for a post from its activity URN. LinkedIn resolves
+ *  `/feed/update/<urn>/` to the post, so we build the permalink from the stable
+ *  URN rather than scraping (and clicking) the post's own "copy link" menu. */
+function permalinkFromUrn(urn: string): string {
+  return `https://www.linkedin.com/feed/update/${urn}/`;
+}
+
+/** Collapse an exact double of a string back to a single copy. LinkedIn's actor
+ *  name renders twice — a visible span plus a visually-hidden a11y span — so a
+ *  naive `textContent` yields "Ada LovelaceAda Lovelace"; this restores "Ada
+ *  Lovelace". Handles the doubling with or without a single separating space, and
+ *  leaves a non-doubled string untouched. */
+function dedupeDoubled(s: string): string {
+  const n = s.length;
+  if (n >= 2 && n % 2 === 0 && s.slice(0, n / 2) === s.slice(n / 2)) {
+    return s.slice(0, n / 2);
+  }
+  const mid = (n - 1) / 2;
+  if (n % 2 === 1 && s[mid] === " " && s.slice(0, mid) === s.slice(mid + 1)) {
+    // Only treat a space-separated exact double as the a11y artifact when the
+    // repeated unit is itself multi-word ("Ada Lovelace Ada Lovelace"). A
+    // single-token double like "Jan Jan" is far more likely a genuine name than the
+    // visible+hidden-span doubling, so leave it intact rather than halve a real name.
+    const unit = s.slice(0, mid);
+    if (unit.includes(" ")) return unit;
+  }
+  return s;
+}
+
+/** The activity URN embedded in a post permalink (built by {@link permalinkFromUrn}),
+ *  or `null` when the URL carries none. */
+function urnFromPostUrl(url: string): string | null {
+  return url.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0] ?? null;
+}
+
+/**
+ * The post container on the page matching `url`'s activity URN, or `null` when it
+ * isn't present (yet). A post permalink page (`/feed/update/<urn>/`) also renders
+ * *recommended* posts, each with its own comment button and lazily-mounted editor,
+ * so the target post is NOT reliably first in the DOM — scoping the composer lookup
+ * to the container whose URN matches the permalink is what keeps a drafted comment
+ * from landing in a neighbouring post's box. */
+export function postContainerForUrl(url: string): HTMLElement | null {
+  const urn = urnFromPostUrl(url);
+  if (!urn) return null;
+  const containers = Array.from(document.querySelectorAll<HTMLElement>(selStr("postContainer")));
+  // Exact URN match — the reliable case.
+  for (const c of containers) {
+    if (postUrn(c) === urn) return c;
+  }
+  // Fallback: LinkedIn sometimes serves a share/ugcPost permalink under a different
+  // URN *type* (e.g. an activity URN) for the same post, so an exact match misses and
+  // the post is silently dropped. Match on the shared trailing numeric id instead —
+  // but ONLY when EXACTLY ONE container carries it, so a permalink page's recommended
+  // posts can never resolve to the WRONG post (an ambiguous page yields null, the
+  // same safe outcome as before). When ids differ across URN types this matches
+  // nothing, which is also safe.
+  const id = urn.match(/:(\d+)$/)?.[1];
+  if (!id) return null;
+  const byId = containers.filter((c) => postUrn(c)?.endsWith(`:${id}`));
+  return byId.length === 1 ? byId[0] : null;
+}
+
+/** Canonicalize a post URL to `origin + pathname` with a trailing slash (dropping
+ *  query + fragment) — the key a drafted comment is cached under and that a review
+ *  tab recomputes from its own location to read the draft back. Both sides run
+ *  this identical normalization, so the keys match after navigation. */
+export function normalizePostUrl(href: string): string {
+  try {
+    const u = new URL(href, location.origin);
+    const path = u.pathname.endsWith("/") ? u.pathname : `${u.pathname}/`;
+    return `${u.origin}${path}`;
+  } catch {
+    return href;
+  }
+}
+
+/** The rendered text of an element — `innerText` (rendered, respects visibility)
+ *  when available, falling back to `textContent` so it still works in a background
+ *  tab that hasn't laid out. */
+function renderedText(el: Element): string {
+  return (el as HTMLElement).innerText || el.textContent || "";
+}
+
+/**
+ * Post containers currently in the DOM. Primary anchor: LinkedIn tags each feed
+ * item's wrapper `div[data-display-contents="true"]` and prefixes its text with the
+ * a11y label "Feed post …" — a class-independent, rotation-proof hook (the same one
+ * the reference scraper anchors on, which is why it keeps working when the obfuscated
+ * class names churn). Unioned with the class/URN-based `postContainer` selector so a
+ * profile's recent-activity page (no "Feed post" prefix) is still covered. Deduped,
+ * in document order.
+ */
+function findPostContainers(): HTMLElement[] {
+  const found: HTMLElement[] = [];
+  const seen = new Set<Element>();
+  const add = (el: HTMLElement): void => {
+    if (!seen.has(el)) {
+      seen.add(el);
+      found.push(el);
+    }
+  };
+  for (const d of Array.from(
+    document.querySelectorAll<HTMLElement>('div[data-display-contents="true"]'),
+  )) {
+    if (renderedText(d).trimStart().startsWith("Feed post")) add(d);
+  }
+  for (const c of Array.from(document.querySelectorAll<HTMLElement>(selStr("postContainer")))) {
+    add(c);
+  }
+  return found;
+}
+
+/** Canonicalize any post URL/string to `/feed/update/urn:li:activity:<id>/` — the
+ *  form the post tab matches on (see {@link postContainerForUrl}). Accepts a full
+ *  `urn:li:…` token, or lifts the numeric activity id from a `/posts/…-activity-<id>`
+ *  slug or a bare number. Empty when no id is present. */
+export function canonicalPostPermalink(raw: string): string {
+  const urn = raw.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0];
+  if (urn) return normalizePostUrl(permalinkFromUrn(urn));
+  const id = raw.match(/(\d{15,25})/)?.[1];
+  if (id) return normalizePostUrl(permalinkFromUrn(`urn:li:activity:${id}`));
+  return "";
+}
+
+/** A post's permalink straight from the DOM, when LinkedIn happens to expose it — the
+ *  activity URN attribute, or an explicit `/feed/update/…` · `/posts/…` link in the
+ *  block. Empty when neither is present (the common feed case), in which case the
+ *  scrape falls back to the ⋯ "Copy link to post" clipboard capture. */
+export function postPermalink(container: HTMLElement): string {
+  const urn = postUrn(container);
+  if (urn) return normalizePostUrl(permalinkFromUrn(urn));
+  const a = container.querySelector<HTMLAnchorElement>(
+    'a[href*="/feed/update/"], a[href*="/posts/"]',
+  );
+  return a ? canonicalPostPermalink(a.getAttribute("href") ?? "") : "";
+}
+
+/** A post's body text: the dedicated text node when the selector matches, else the
+ *  block's own rendered text with the "Feed post" a11y prefix stripped — so a rotated
+ *  text class still yields something to draft from. Whitespace-collapsed, capped. */
+export function postBodyText(container: HTMLElement): string {
+  const MAX = 3000;
+  let text = (container.querySelector(selStr("postText"))?.textContent ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) {
+    text = renderedText(container)
+      .replace(/^\s*Feed post\s*/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  return text.length > MAX ? text.slice(0, MAX) : text;
+}
+
+/** A post author's display name: the dedicated actor-name node when it matches, else
+ *  the block's first profile (`/in/`) link. Doubled-name + lockup junk stripped. */
+export function postAuthorName(container: HTMLElement): string {
+  const raw =
+    container.querySelector(selStr("postActorName"))?.textContent ||
+    container.querySelector('a[href*="/in/"]')?.textContent ||
+    "";
+  return dedupeDoubled(cleanText(raw));
+}
+
+/** Whether a post block is a promoted/ad card — never worth commenting on, and it has
+ *  no shareable permalink anyway. */
+export function isPromotedBlock(container: HTMLElement): boolean {
+  return /\bPromoted\b/.test(renderedText(container));
+}
+
+/** A stable-enough per-post key for the scrape's "seen" set: the block's leading
+ *  rendered text (feed blocks recycle on scroll and carry no stable id, so we key on
+ *  content, like the reference scraper does). Empty when the block has no text. */
+export function postTextKey(container: HTMLElement): string {
+  // A longer prefix than the original 160 chars: two DIFFERENT posts that share a
+  // long lead-in (reshares of the same article, boilerplate intros) collided at 160
+  // and the second was silently dropped from the scrape. 400 chars keeps the key
+  // cheap while making that collision far less likely.
+  return renderedText(container)
+    .replace(/^\s*Feed post\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+}
+
+/**
+ * The next post block not yet in `seen`, marked seen and scrolled into view — the
+ * interactive scrape processes ONE post at a time (find → capture its link → next),
+ * mirroring the reference scraper, because a post's permalink is only obtainable by
+ * acting on that specific post (its ⋯ menu). Returns `null` when every currently
+ * rendered block has been seen (the caller then scrolls to load more). Blocks with
+ * no text are skipped without being marked (they're not posts).
+ */
+export function nextUnseenPost(seen: Set<string>): HTMLElement | null {
+  for (const block of findPostContainers()) {
+    const key = postTextKey(block);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    try {
+      block.scrollIntoView({ block: "center" });
+    } catch {
+      // A detached/odd node — ignore; still return it to attempt capture.
+    }
+    return block;
+  }
+  return null;
+}
+
+/** Open a post's ⋯ control menu (which holds "Copy link to post"). Prefers a button
+ *  whose aria-label reads as a control/options menu, falling back to the healable
+ *  `postMenuButton` selector. Returns whether a button was found and clicked. */
+export function openPostControlMenu(container: HTMLElement): boolean {
+  try {
+    const byAria = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((b) => {
+      const a = (b.getAttribute("aria-label") ?? "").toLowerCase();
+      return /control menu|more actions|open options|more options/.test(a);
+    });
+    const btn = byAria ?? container.querySelector<HTMLButtonElement>(selStr("postMenuButton"));
+    if (!btn) return false;
+    btn.click();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Click the "Copy link to post" item in the (now-open) control menu. LinkedIn
+ *  renders the menu as a document-level popup, so we CAN'T scope to the post's
+ *  container — but we MUST NOT match a stale/other menu left open from a prior post
+ *  (which would copy the wrong post's link and pair it with this post's text). So we
+ *  search only VISIBLE, currently-open dropdown popups (never the whole document),
+ *  and among them the last one in DOM order — the most recently opened. Text match
+ *  is locale-dependent, like the reference. Returns whether it was clicked. */
+export function clickCopyLinkItem(): boolean {
+  try {
+    // Currently-open, visible dropdown popups only. `offsetParent === null` filters
+    // out closed/hidden menus still in the DOM. Last = most recently opened.
+    const openMenus = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '.artdeco-dropdown__content--is-open, [role="menu"], .artdeco-dropdown__content',
+      ),
+    ).filter((m) => m.offsetParent !== null);
+    const roots: ParentNode[] = openMenus.length > 0 ? openMenus.reverse() : [document];
+    for (const root of roots) {
+      const items = Array.from(
+        root.querySelectorAll<HTMLElement>('[role="menuitem"], div[role="button"], button, a'),
+      );
+      const el = items.find((e) =>
+        /copy link to post|copy link/i.test((e.innerText || e.textContent || "").trim()),
+      );
+      if (el) {
+        el.click();
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Dismiss any open menu/popup so the next post's ⋯ click isn't blocked or, worse,
+ *  its stale "Copy link" item matched. LinkedIn frequently ignores a synthetic
+ *  Escape dispatched only at the document, so we also fire it at the active element
+ *  and click the dropdown's own dismiss trigger / an empty area, and finally blur —
+ *  layered because no single signal reliably closes an artdeco dropdown. */
+export function closeOpenMenu(): void {
+  try {
+    const esc = (): KeyboardEvent =>
+      new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true });
+    const active = document.activeElement as HTMLElement | null;
+    active?.dispatchEvent(esc());
+    document.dispatchEvent(esc());
+    document.body?.dispatchEvent(esc());
+    // An outside pointerdown is what actually dismisses an artdeco dropdown when
+    // Escape is swallowed; the body is a safe, no-navigation target.
+    document.body?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    active?.blur?.();
+  } catch {
+    // Never propagate into the host page.
+  }
+}
+
+/** The comment composer's editable box within `scope`, or `null` when it isn't
+ *  present/open yet. `scope` should be the target post's container (see
+ *  {@link postContainerForUrl}) so a permalink page's recommended-post composers
+ *  can't be mistaken for this post's; defaults to the whole document. */
+export function findCommentEditor(scope: ParentNode = document): HTMLElement | null {
+  return scope.querySelector<HTMLElement>(selStr("commentEditable"));
+}
+
+/** Reveal a post's comment composer by clicking its comment button (LinkedIn
+ *  lazily mounts the editor only after the button is pressed). Scoped to `scope`
+ *  (the target post's container) so it never opens a neighbouring post's composer.
+ *  Fail-quiet — a missing button just means the editor may already be present, or
+ *  isn't reachable, and the caller polls for {@link findCommentEditor} either way. */
+export function openCommentComposer(scope: ParentNode = document): void {
+  try {
+    if (findCommentEditor(scope)) return;
+    const btns = Array.from(scope.querySelectorAll<HTMLButtonElement>(selStr("commentButton")));
+    // Both the "Comment" ACTION button and the "N comments" count toggle can match
+    // the selector; prefer the one whose aria-label reads as the action, falling
+    // back to the first match so a label change never leaves us unable to open it.
+    const isAction = (b: HTMLButtonElement): boolean => {
+      const a = (b.getAttribute("aria-label") ?? "").trim().toLowerCase();
+      return a === "comment" || a.startsWith("comment on");
+    };
+    (btns.find(isAction) ?? btns[0])?.click();
+  } catch {
+    // Never propagate into the host page.
+  }
+}
+
+/** Write `text` into the (already-open) comment composer's editable box within
+ *  `scope`. Returns whether it was written (false when no comment editor is
+ *  present). Same active-document / focus rules as {@link writeComposer}; never
+ *  submits. */
+export function writeCommentBox(text: string, scope: ParentNode = document): boolean {
+  const editable = findCommentEditor(scope);
+  if (!editable) return false;
+  return writeIntoEditable(editable, text);
+}
+
+/** Whether the comment composer within `scope` already holds user-typed text — so
+ *  a fill never clobbers a comment in progress. */
+export function commentBoxHasText(scope: ParentNode = document): boolean {
+  return hasVisibleText(findCommentEditor(scope));
+}
+
+/** Normalize comment text for a resilient, truncation-tolerant match: collapse
+ *  whitespace, drop the trailing "…more" / "…see more" fold LinkedIn appends when it
+ *  clips a long comment, and lowercase. */
+function normalizeCommentText(s: string): string {
+  return s
+    .replace(/\s+/g, " ")
+    .replace(/(?:…|\.\.\.)?\s*see more\s*$/i, "")
+    .replace(/(?:…|\.\.\.)\s*more?\s*$/i, "")
+    .trim()
+    .toLowerCase();
+}
+
+/** Length of the leading slice compared when matching a comment. Long enough that
+ *  an unrelated comment won't collide, short enough to survive LinkedIn's "…more"
+ *  truncation of a long comment. */
+const COMMENT_MATCH_PREFIX = 80;
+/** Below this, a comment is too short to match without risking a false positive
+ *  against some other brief comment — skip the check rather than guess. */
+const COMMENT_MATCH_MIN = 12;
+
+/**
+ * Whether a comment matching `text` is ALREADY posted in `scope`'s comment thread —
+ * the mechanical idempotency guard that stops a duplicate PUBLIC comment. This is
+ * the reliable source of truth for "did it post": LinkedIn's own rendered thread,
+ * not a timing heuristic. Used both before posting (a prior attempt may have posted
+ * but had its confirmation time out and been recorded "failed") and to confirm a
+ * submit landed. Matches on a distinctive leading slice (so a truncated long comment
+ * still matches) and requires a long-enough prefix that an unrelated comment can't
+ * collide. `scope` must be the target post's OWN container so a neighbouring post's
+ * comments never count. Fail-quiet — a DOM/selector miss returns false (never a
+ * false "already posted" that would suppress a real post).
+ */
+export function commentAlreadyPresent(scope: ParentNode, text: string): boolean {
+  try {
+    const needle = normalizeCommentText(text);
+    if (needle.length < COMMENT_MATCH_MIN) return false;
+    const key = needle.slice(0, COMMENT_MATCH_PREFIX);
+    for (const el of Array.from(scope.querySelectorAll<HTMLElement>(selStr("commentItemBody")))) {
+      const hay = normalizeCommentText(renderedText(el));
+      if (hay.length >= COMMENT_MATCH_MIN && (hay.startsWith(key) || hay.includes(key))) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Submit the (already-filled) comment in `scope`'s composer by clicking its
+ *  submit button — the AUTO-POST step. Returns whether a submit control was found,
+ *  enabled, and clicked; `false` when the button is missing or still disabled
+ *  (LinkedIn disables it until the box holds text, so the caller retries after the
+ *  write has registered). Scoped to the target post's container so a permalink
+ *  page's recommended-post composers are never submitted. Fail-quiet. */
+export function submitComment(scope: ParentNode = document): boolean {
+  try {
+    const btn = (scope instanceof Element ? scope : document).querySelector<HTMLButtonElement>(
+      selStr("commentSubmit"),
+    );
+    if (!btn || btn.disabled) return false;
+    btn.click();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Message scraping ─────────────────────────────────────────────────────────

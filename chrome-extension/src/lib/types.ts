@@ -32,6 +32,16 @@ export interface AddProspectResult {
   };
 }
 
+/** `GET /prospect` response: whether the open thread's person is already a
+ *  prospect, and which pitch they're on. `pitch_id` is null when the prospect was
+ *  added without a pitch (deleting a pitch removes its prospects, so it never strands
+ *  a null-pitch row). The extension resolves the pitch *name* from the pitch list it
+ *  already fetched (no name is sent here). */
+export interface ProspectLookup {
+  exists: boolean;
+  pitch_id: number | null;
+}
+
 /** Who sent a captured message. `outgoing` = you messaged the prospect (drives
  *  the messages-sent count); `incoming` = the prospect replied. The newest
  *  message's direction drives their "awaiting reply" state. */
@@ -80,6 +90,27 @@ export interface DraftReplyPayload {
  *  be built. Written verbatim into the thread's compose box either way. */
 export interface DraftResult {
   draft: string;
+}
+
+// ── The LinkedIn commenter ───────────────────────────────────────────────────
+
+/** A watched profile, as returned by the app's `GET /watched-profiles` — a
+ *  LinkedIn profile a comment run visits (before the feed) to check for new
+ *  posts. Mirrors the Rust `WatchedProfile`. */
+export interface WatchedProfile {
+  id: number;
+  linkedin_url: string;
+  name: string;
+  created_at: string;
+}
+
+/** One post scraped from the feed or a profile's recent-activity — the material a
+ *  comment run drafts from. `permalink` is the post's canonical URL (the per-post
+ *  dedup key and where a review tab opens to place the comment). */
+export interface ScrapedPost {
+  permalink: string;
+  author_name: string;
+  text: string;
 }
 
 /** A `{key: value}` map of LinkedIn-selector overrides (value = a CSS string or an
@@ -131,14 +162,24 @@ export interface OutboxItem extends CapturedMessage {
 export type Request =
   | { type: "checkin" }
   | { type: "listPitches" }
+  | { type: "lookupProspect"; payload: { linkedin_url: string } }
   | { type: "addProspect"; payload: NewProspect }
   | { type: "queueMessages"; payload: QueueMessagesPayload }
   | { type: "draftReply"; payload: DraftReplyPayload }
-  | { type: "resetReviewQueue" }
+  | { type: "resetReviewQueue"; payload: { hash: string } }
   | { type: "openReviewTab"; payload: OpenReviewTabPayload }
   | { type: "reviewTabFilled" }
   | { type: "getSelectors" }
-  | { type: "healSelectors"; payload: HealSelectorsPayload };
+  | { type: "healSelectors"; payload: HealSelectorsPayload }
+  // A LinkedIn tab nudging the SW to check the app for pending comment work (a
+  // requested scrape or queued posts) — the app can't push to the extension, so
+  // this makes "Scrape" / "Post all" start promptly. Fire-and-forget.
+  | { type: "pollCommentWork" }
+  // Worker-tab → SW (internal): a scrape tab reporting the posts it scraped, and a
+  // post tab reporting whether it auto-submitted its comment. The SW correlates
+  // each to the pending job by the sender tab's id, then closes the tab.
+  | { type: "postsScraped"; payload: { posts: ScrapedPost[] } }
+  | { type: "commentPosted"; payload: { status: "posted" | "failed"; error: string } };
 
 export type Response<T> =
   | { ok: true; data: T }

@@ -57,6 +57,19 @@ export const MESSAGE_KEYS: SelectorKey[] = [
  *  rows and the token marking the open one. Rotation here silently breaks the
  *  "Draft for N" cycle (no rows found, or none ever confirms as open). */
 export const THREAD_KEYS: SelectorKey[] = ["threadRow", "activeRowToken"];
+/** Selector group for scraping posts (feed + recent-activity) during a comment
+ *  run. Rotation here means a run finds no posts to comment on — which is exactly
+ *  what triggers a heal (see `runScrapeMode`). Includes the ⋯ menu button, since the
+ *  permalink capture falls back to its "Copy link to post" item. */
+export const POST_KEYS: SelectorKey[] = [
+  "postContainer",
+  "postText",
+  "postActorName",
+  "postMenuButton",
+];
+/** Selector group for placing a drafted comment: the button that opens a post's
+ *  comment composer and the composer's editable box. */
+export const COMMENT_KEYS: SelectorKey[] = ["commentButton", "commentEditable"];
 
 let inFlight = false;
 const healedKeys = new Set<SelectorKey>();

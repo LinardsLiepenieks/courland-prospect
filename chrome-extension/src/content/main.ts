@@ -14,13 +14,41 @@ import {
 } from "./linkedin";
 import { buildWidget } from "./widget";
 import { buildDraftControl, isFillTab, runFillMode } from "./draft";
+import { runCommentPostMode, runScrapeMode } from "./comment";
 import { bootstrapSelectors, MOUNT_KEYS, requestHeal } from "./heal";
 import { selStr } from "./selectors";
+import { POST_COMMENT_HASH, SCRAPE_HASH } from "../lib/storageKeys";
 
 // If this tab was opened by the review-tab queue, it carries the `#cpfill` marker
 // so it can pre-fill the cached draft. Captured once at load (before we clear the
 // hash below) so the injection guard can see it even after it's stripped.
 const fillTab = isFillTab();
+// The commenter's two SW-opened tab kinds, likewise detected from the URL hash at
+// load: a POST tab (auto-submit an approved comment) and a SCRAPE worker tab
+// (report the feed's / a profile's posts). Captured before the hash is stripped.
+const hash = location.hash.replace(/^#/, "");
+// A post tab carries `cppost=<encoded canonical permalink>` — the key the approved
+// comment is cached under. (Bare `cppost` is tolerated as a fallback.)
+const postTab = hash === POST_COMMENT_HASH || hash.startsWith(`${POST_COMMENT_HASH}=`);
+let postKey: string | null = null;
+if (hash.startsWith(`${POST_COMMENT_HASH}=`)) {
+  try {
+    postKey = decodeURIComponent(hash.slice(POST_COMMENT_HASH.length + 1));
+  } catch {
+    // A malformed %-escape (only reachable via a hand-crafted URL — the SW always
+    // encodes) must not throw during content-script init and take down the page's
+    // widgets/capture. Fall back to the location-derived key in runCommentPostMode.
+    postKey = null;
+  }
+}
+// A scrape worker tab carries `cpscrape=<target>` — how many posts to collect
+// (bare `cpscrape` tolerated as a fallback → a default target).
+const scrapeTab = hash === SCRAPE_HASH || hash.startsWith(`${SCRAPE_HASH}=`);
+let scrapeTarget = 20;
+if (hash.startsWith(`${SCRAPE_HASH}=`)) {
+  const n = parseInt(hash.slice(SCRAPE_HASH.length + 1), 10);
+  if (Number.isFinite(n) && n > 0) scrapeTarget = n;
+}
 
 function inject(): void {
   injectComposeWidgets();
@@ -158,6 +186,28 @@ document.addEventListener("visibilitychange", () => {
 });
 checkin();
 
+// Nudge the service worker to check the app for pending comment work — a requested
+// scrape or queued posts. The app can't push to the extension, so this poll (from
+// any real, focused LinkedIn tab) is what makes "Scrape" / "Post all" start
+// promptly; the SW's periodic alarm backstops it when no tab is focused. Skipped on
+// the SW's own worker/post/fill tabs (background + transient) and when hidden, so
+// it never busies /health while LinkedIn is closed or backgrounded.
+function pollCommentWork(): void {
+  if (fillTab || scrapeTab || postTab) return;
+  if (document.visibilityState !== "visible") return;
+  try {
+    void chrome.runtime.sendMessage({ type: "pollCommentWork" }).catch(() => {});
+  } catch {
+    // Extension context invalidated (reload/update) — the alarm backstops it.
+  }
+}
+window.setInterval(pollCommentWork, 6_000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") pollCommentWork();
+});
+window.addEventListener("focus", pollCommentWork);
+pollCommentWork();
+
 // Load any persisted selector overrides (from prior self-heals) before the first
 // inject, then re-run once they land. The immediate schedule() below still mounts
 // on the compiled defaults so there's no wait on the happy path.
@@ -172,5 +222,25 @@ if (fillTab) {
   history.replaceState(null, "", location.pathname + location.search);
   void runFillMode().catch(() => {
     // runFillMode already surfaces failures via a toast; never propagate.
+  });
+}
+
+// Post tab: opened by the SW straight on a post's permalink (tagged `#cppost`) to
+// AUTO-SUBMIT an approved comment. Clear the hash first so an SPA re-render/refresh
+// can't re-trigger the post, then write + submit the cached comment and report the
+// outcome back to the SW.
+if (postTab) {
+  history.replaceState(null, "", location.pathname + location.search);
+  void runCommentPostMode(postKey).catch(() => {
+    // runCommentPostMode reports its own outcome to the SW; never propagate.
+  });
+}
+
+// Scrape worker tab: opened by the SW on a watched profile's recent-activity
+// (tagged `#cpscrape`) to scrape its posts and report them back. The SW closes the
+// tab once it reports; leave the hash in place (nothing keys off stripping it).
+if (scrapeTab) {
+  void runScrapeMode(scrapeTarget).catch(() => {
+    // Best-effort; runScrapeMode reports [] on failure so the SW waiter resolves.
   });
 }

@@ -30,14 +30,14 @@ import {
   writeComposer,
 } from "./linkedin";
 import { friendlyError, send } from "./bridge";
-import { el } from "./dom";
+import { el, whenTabForeground } from "./dom";
 import { IDENTITY_KEYS, requestHeal, THREAD_KEYS } from "./heal";
 import { showToast } from "./toast";
 import { hideDraftOverlay, showDraftOverlay } from "./overlay";
 import { delay } from "../lib/delay";
-import { FILL_HASH, LAST_PITCH_KEY } from "../lib/storageKeys";
+import { DRAFT_NS_REPLY, FILL_HASH, LAST_PITCH_KEY } from "../lib/storageKeys";
 import { clearDrafts, peekDraft, putDraft, removeDraft } from "../lib/draftStore";
-import type { DraftMessageInput, DraftResult, Pitch } from "../lib/types";
+import type { DraftMessageInput, DraftResult, Pitch, ProspectLookup } from "../lib/types";
 
 /** Whether this tab was opened by the review-tab queue to be pre-filled with a
  *  cached draft — detected by the `#cpfill` hash marker the queue appends. Read
@@ -65,7 +65,10 @@ export function buildDraftControl(): HTMLElement {
   feedback.setAttribute("role", "status");
 
   const pitch = el("select", "cp-draft-pitch");
-  pitch.title = "Pitch whose snippets the drafts are built from";
+  // Each prospect is drafted from their OWN pitch (resolved per conversation in
+  // runCycle); this dropdown is the fallback for threads whose person isn't a
+  // prospect yet.
+  pitch.title = "Fallback pitch — used only for people who aren't prospects yet";
   pitch.disabled = true;
 
   const row = el("div", "cp-draft-row");
@@ -215,17 +218,21 @@ interface CycleProgress {
  * WITHOUT awaiting it — so the cycle scans at DOM speed while generations run
  * concurrently (server-capped). Each resolved draft is cached by thread URL and a
  * pre-filled review tab is opened for it. Resolves once every generation settles.
+ *
+ * Each conversation is drafted from ITS prospect's own pitch (looked up by URL in
+ * generateAndQueue); `fallbackPitchId` is used only for threads whose person isn't
+ * a prospect yet — so a mixed batch never builds a reply from the wrong library.
  */
 export async function runCycle(
-  pitchId: number,
+  fallbackPitchId: number,
   count: number,
   start: number,
   report: (p: CycleProgress) => void,
 ): Promise<void> {
   // Fresh batch: drop any leftover cached drafts and reset the review-tab queue so
   // this run never surfaces a previous run's drafts or inherits a spent slot count.
-  await clearDrafts();
-  await send({ type: "resetReviewQueue" });
+  await clearDrafts(DRAFT_NS_REPLY);
+  await send({ type: "resetReviewQueue", payload: { hash: FILL_HASH } });
 
   // Preflight: on the messaging inbox with no conversation rows resolvable, the
   // thread-row selector has likely rotated — every index would read as "end of
@@ -294,7 +301,12 @@ export async function runCycle(
       body: m.body,
     }));
     const name = thread.name;
-    const p = generateAndQueue(pitchId, url, name, messages).then((ok) => {
+    // Two different URL namespaces here: `thread.url` is the person's PROFILE url
+    // (/in/<slug>/ — how prospects are keyed, so the pitch lookup must use it),
+    // while `url` is the THREAD url (/messaging/thread/<id>/ — how the draft cache
+    // and review tab are keyed). Passing the thread url to the lookup would never
+    // match a prospect, silently collapsing every draft onto the fallback pitch.
+    const p = generateAndQueue(fallbackPitchId, thread.url, url, name, messages).then((ok) => {
       if (ok) ready += 1;
       else failed += 1;
       tick(false);
@@ -309,23 +321,43 @@ export async function runCycle(
 }
 
 /** Generate one conversation's draft, cache it by URL, and ask the SW to open a
- *  pre-filled review tab for it. The cache write completes BEFORE the tab is asked
- *  to open, so the draft is present the moment that tab loads. Returns whether a
- *  draft was produced and queued. */
+ *  pre-filled review tab for it. The pitch is resolved per conversation from the
+ *  person's PROFILE url (`profileUrl`) — the thread's prospect's own pitch,
+ *  falling back to `fallbackPitchId` for a non-prospect — so a mixed batch never
+ *  drafts from the wrong snippet library. The draft cache and review tab are keyed
+ *  by the THREAD url (`threadUrl`), which is what the review tab peeks by. The
+ *  cache write completes BEFORE the tab is asked to open, so the draft is present
+ *  the moment that tab loads. Returns whether a draft was produced. */
 async function generateAndQueue(
-  pitchId: number,
-  url: string,
+  fallbackPitchId: number,
+  profileUrl: string,
+  threadUrl: string,
   name: string,
   messages: DraftMessageInput[],
 ): Promise<boolean> {
+  const pitchId = await resolvePitchForThread(profileUrl, fallbackPitchId);
   const res = await send<DraftResult>({
     type: "draftReply",
     payload: { prospect_name: name, pitch_id: pitchId, messages },
   });
   if (!res.ok) return false;
-  await putDraft(url, res.data.draft);
-  await send({ type: "openReviewTab", payload: { url } });
+  await putDraft(DRAFT_NS_REPLY, threadUrl, res.data.draft);
+  await send({ type: "openReviewTab", payload: { url: threadUrl } });
   return true;
+}
+
+/** The pitch to draft this person's reply from: their own prospect pitch when
+ *  they're tracked (so the reply is built from the right library), else the batch
+ *  fallback. `profileUrl` must be the /in/<slug>/ profile url — the key prospects
+ *  are stored under. A prospect on a since-deleted pitch (pitch_id null) or a
+ *  failed lookup both fall back — drafting must never be blocked by the lookup. */
+async function resolvePitchForThread(profileUrl: string, fallback: number): Promise<number> {
+  const res = await send<ProspectLookup>({
+    type: "lookupProspect",
+    payload: { linkedin_url: profileUrl },
+  });
+  if (res.ok && res.data.exists && res.data.pitch_id != null) return res.data.pitch_id;
+  return fallback;
 }
 
 /**
@@ -422,7 +454,7 @@ export async function runFillMode(): Promise<void> {
     // Peek only to decide whether this tab has work and to free the slot; the draft
     // itself is re-read AFTER the foreground wait, so a batch-start clear or a
     // regeneration during the (possibly long) idle wait is honored.
-    const pending = await peekDraft(url);
+    const pending = await peekDraft(DRAFT_NS_REPLY, url);
     // Loaded far enough to know our draft — free the queue slot so the next tab
     // opens, rather than holding it through the idle wait for foreground.
     freeSlot();
@@ -440,13 +472,13 @@ export async function runFillMode(): Promise<void> {
     // Re-read after the idle wait: a new batch may have cleared or superseded this
     // entry (the cache is shared and mutable, but our snapshot above is not). A null
     // now means it's stale or already consumed — never paste a superseded draft.
-    const draft = await peekDraft(url);
+    const draft = await peekDraft(DRAFT_NS_REPLY, url);
     if (draft == null) return;
     // Re-guard on the fresh root: the user may have started typing here while the
     // tab sat in the background. Never clobber a hand-written reply.
     if (composerHasText(thread.root)) {
       showToast("info", "You already have a draft here — left it untouched.");
-      await removeDraft(url);
+      await removeDraft(DRAFT_NS_REPLY, url);
       return;
     }
     if (writeComposer(thread.root, draft)) {
@@ -454,7 +486,7 @@ export async function runFillMode(): Promise<void> {
     } else {
       showToast("error", "Couldn't write the draft into the message box.");
     }
-    await removeDraft(url);
+    await removeDraft(DRAFT_NS_REPLY, url);
   } finally {
     hideDraftOverlay();
     freeSlot();
@@ -485,21 +517,3 @@ function resolvePersonThread(): PersonThread | null {
   return null;
 }
 
-/** Resolve once this tab is in the foreground — immediately if it already is,
- *  otherwise on the next visibility/focus gain. The review tab holds its finished
- *  draft until the user switches to it, then pastes (execCommand acts on the active
- *  document). */
-function whenTabForeground(): Promise<void> {
-  const ready = (): boolean => document.visibilityState === "visible" && document.hasFocus();
-  if (ready()) return Promise.resolve();
-  return new Promise((resolve) => {
-    const check = (): void => {
-      if (!ready()) return;
-      document.removeEventListener("visibilitychange", check);
-      window.removeEventListener("focus", check);
-      resolve();
-    };
-    document.addEventListener("visibilitychange", check);
-    window.addEventListener("focus", check);
-  });
-}

@@ -16,8 +16,11 @@ export default defineManifest({
   key: KEY,
   minimum_chrome_version: "116",
   // storage: last-used pitch + the message outbox. alarms: periodic outbox flush
-  // (delivers capture done while the app was closed). No broad permissions.
-  permissions: ["storage", "alarms"],
+  // (delivers capture done while the app was closed). clipboardRead/Write: the
+  // comment scrape captures each post's permalink the only reliable way LinkedIn
+  // exposes it — its ⋯ "Copy link to post" writes the URL to the clipboard, which
+  // the (foreground) scrape tab then reads back. No broad permissions.
+  permissions: ["storage", "alarms", "clipboardRead", "clipboardWrite"],
   host_permissions: [
     "https://www.linkedin.com/*",
     // The loopback ingest server (any port on 127.0.0.1 — match patterns ignore

@@ -78,6 +78,43 @@
   cursor: progress;
 }
 
+/* Read-only "Prospect of <pitch>" status, shown instead of the add cluster once
+   the person is already tracked. Deliberately NOT button-like: crimson appears
+   only as a small accent dot (not a fill), text is muted, and there are no
+   hover/press affordances — it reads as a settled fact, not a control. */
+.cp-prospect-of {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  max-width: 100%;
+  padding: 0 12px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1d2226;
+  background: rgba(193, 27, 54, 0.08); /* crimson, barely tinted */
+  border: 1px solid rgba(193, 27, 54, 0.22);
+  border-radius: 14px;
+  white-space: nowrap;
+  cursor: default;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-prospect-of::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cp-accent); /* the one saturated crimson accent */
+}
+
+/* Keep the [hidden] toggle working despite the display rule above. */
+.cp-prospect-of[hidden] {
+  display: none;
+}
+
 /* Floating feedback, absolutely positioned above the row. */
 .cp-feedback {
   position: absolute;
@@ -283,3 +320,7 @@
     transform: none;
   }
 }
+
+/* The "Comment run" control moved into the app's Comments tab — the run is now
+   orchestrated by the service worker (see background.ts) and reviewed in-app, so
+   no floating feed card is injected anymore. */

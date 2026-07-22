@@ -16,7 +16,13 @@ import { IDENTITY_KEYS, MESSAGE_KEYS, requestHeal } from "./heal";
 import { selStr } from "./selectors";
 import { showToast, type ToastKind } from "./toast";
 import { LAST_PITCH_KEY } from "../lib/storageKeys";
-import type { AddProspectResult, CaptureOutcome, Pitch, Response } from "../lib/types";
+import type {
+  AddProspectResult,
+  CaptureOutcome,
+  Pitch,
+  ProspectLookup,
+  Response,
+} from "../lib/types";
 
 /** After a send, LinkedIn renders the message (and assigns its stable urn)
  *  asynchronously. We scrape on two passes — a quick one, then a backstop — so we
@@ -197,8 +203,20 @@ export function buildWidget(sendBtn: Element): HTMLElement {
   button.type = "button";
   button.textContent = "Add to Prospects";
   button.disabled = true; // enabled once pitches + identity are ready
+  // Read-only status shown instead of the add cluster once this person is already
+  // a prospect (see refreshProspectStatus). Hidden until a lookup confirms it.
+  const label = el("div", "cp-prospect-of");
+  label.hidden = true;
 
-  root.append(feedback, select, button);
+  root.append(feedback, select, button, label);
+
+  // The pitch list, cached once loaded so a prospect-status lookup can resolve a
+  // pitch id to its name (the lookup returns only the id).
+  let pitches: Pitch[] = [];
+  function pitchName(id: number | null): string | null {
+    if (id == null) return null;
+    return pitches.find((p) => p.id === id)?.name ?? null;
+  }
 
   let feedbackTimer: number | undefined;
   function showFeedback(kind: ToastKind, text: string): void {
@@ -241,6 +259,59 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     syncDisabled();
   }
 
+  // Show the "[Pitch ▾] [Add to Prospects]" cluster (the default: this person
+  // isn't a prospect yet, or we couldn't determine it — never block adding).
+  function showAddMode(): void {
+    label.hidden = true;
+    select.hidden = false;
+    button.hidden = false;
+    refreshIdentityState();
+  }
+
+  // Show the read-only "Prospect of <pitch>" status instead of the add cluster.
+  // Falls back to a generic label when the pitch is unknown (deleted, or not in
+  // the loaded list).
+  function showProspectMode(pitchId: number | null): void {
+    const name = pitchName(pitchId);
+    label.textContent = name ? `Prospect of ${name}` : "Already a prospect";
+    select.hidden = true;
+    button.hidden = true;
+    label.hidden = false;
+  }
+
+  // Guards against a stale lookup landing after a rapid thread switch: each call
+  // takes a token and only the newest one is allowed to touch the UI.
+  let statusToken = 0;
+
+  // Decide which face the widget shows for the CURRENTLY open thread: if its
+  // person is already a prospect, the read-only label; otherwise the add cluster.
+  // Runs on mount (after pitches load) and on every thread switch (cp:rescan) —
+  // the compose root and this widget persist across switches, so a mount-only
+  // check would go stale the moment you open another conversation.
+  async function refreshProspectStatus(): Promise<void> {
+    const token = ++statusToken;
+    const who = identify(scope);
+    if (who.kind !== "person") {
+      // Can't look up a non-person; the add cluster's own disabled state already
+      // reflects the unidentifiable thread.
+      showAddMode();
+      return;
+    }
+    const res = await send<ProspectLookup>({
+      type: "lookupProspect",
+      payload: { linkedin_url: who.identity.url },
+    });
+    // A newer refresh started (the user switched threads mid-flight) — drop this.
+    if (token !== statusToken) return;
+    if (res.ok && res.data.exists) {
+      showProspectMode(res.data.pitch_id);
+    } else {
+      // Not a prospect, or the lookup failed (app closed) — show the add cluster
+      // either way so the user is never blocked from adding them.
+      showAddMode();
+    }
+  }
+
   // Load pitches for the dropdown (fresh each time a chat's widget mounts).
   void (async () => {
     const res = await send<Pitch[]>({ type: "listPitches" });
@@ -249,9 +320,12 @@ export function buildWidget(sendBtn: Element): HTMLElement {
       showFeedback("error", friendlyError(res.error));
       return;
     }
+    pitches = res.data;
     if (res.data.length === 0) {
       setPlaceholder("No pitches yet");
       button.title = "Create a pitch in Courland first.";
+      // A prospect on a since-deleted pitch can still exist with no pitches left.
+      void refreshProspectStatus();
       return;
     }
     for (const pitch of res.data) {
@@ -269,6 +343,9 @@ export function buildWidget(sendBtn: Element): HTMLElement {
       select.value = String(last);
     }
     syncDisabled();
+    // Pitches are loaded, so a lookup can now resolve the pitch name — decide
+    // whether this thread's person is already a prospect.
+    void refreshProspectStatus();
   })();
 
   refreshIdentityState();
@@ -280,6 +357,12 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     (sendBtn.parentElement as HTMLElement | null) ??
     (scope as HTMLElement);
   const capture = setupCapture(composeRoot);
+
+  // A thread open/switch keeps this widget mounted (the compose root persists), so
+  // re-check prospect status for the newly-visible thread — otherwise the label
+  // would keep showing the previous person's pitch. main.ts fires cp:rescan on
+  // SPA navigation. (One listener: main.ts mounts one widget per compose root.)
+  composeRoot.addEventListener("cp:rescan", () => void refreshProspectStatus());
 
   button.addEventListener("click", async () => {
     let result = identify(scope);
@@ -324,6 +407,11 @@ export function buildWidget(sendBtn: Element): HTMLElement {
         res.data.existed ? "info" : "success",
         res.data.existed ? "Already a prospect — pitch updated." : "Added to Prospects ✓",
       );
+      // They're a prospect now — swap the add cluster for the read-only status.
+      // Invalidate any refresh started before the add (its in-flight lookup was
+      // issued when they weren't a prospect and would revert us to the add cluster).
+      statusToken++;
+      showProspectMode(res.data.prospect.pitch_id ?? pitchId);
     } finally {
       delete button.dataset.busy;
       syncDisabled();

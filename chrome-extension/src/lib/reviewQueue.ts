@@ -77,22 +77,26 @@ async function writeJob(job: ReviewJob): Promise<void> {
   await chrome.storage.session.set({ [QUEUE_KEY]: job }).catch(() => {});
 }
 
-function tabUrl(url: string): string {
-  return `${url}#${FILL_HASH}`;
+function tabUrl(url: string, hash: string): string {
+  return `${url}#${hash}`;
 }
 
 /** Open tabs while free slots and work remain, popping URLs off `remaining`,
  *  jittered between opens. Persists after each open so an eviction mid-drain
  *  resumes from the right place. The job is left in place (not cleared) even when
  *  `remaining` empties, because more URLs arrive over the life of a batch as
- *  generation completes; the next batch resets it via `resetReviewQueue`. */
+ *  generation completes; the next batch resets it via `resetReviewQueue`.
+ *
+ *  `remaining` holds fully-built tab URLs (target + `#hash`) — the hash tells the
+ *  content script which fill path to run (a message reply vs. a comment) — so pump
+ *  opens them verbatim. */
 async function pump(job: ReviewJob): Promise<void> {
   while (job.slots > 0 && job.remaining.length > 0) {
     const url = job.remaining.shift() as string;
     job.slots -= 1;
     job.lastOpenAt = Date.now();
     try {
-      await chrome.tabs.create({ url: tabUrl(url), active: false });
+      await chrome.tabs.create({ url, active: false });
     } catch {
       // A tabs.create failure shouldn't stall the rest — the slot is spent and
       // will be reclaimed by the next release or the stall backstop.
@@ -103,21 +107,46 @@ async function pump(job: ReviewJob): Promise<void> {
   await writeJob(job);
 }
 
-/** Reset the queue for a new batch: drop any leftover URLs and restore every slot.
- *  Called when the main tab starts a fresh "Draft for" cycle, so a new run never
- *  inherits the last one's queue state. */
-export function resetReviewQueue(): Promise<void> {
+/** Reset the queue for a new batch. Called when a tab starts a fresh cycle so a new
+ *  run never inherits its OWN last run's leftover URLs.
+ *
+ *  With `baseHash` (the fill-hash prefix identifying the feature — `FILL_HASH` for
+ *  the message-reply batch), only that feature's queued URLs are dropped and the
+ *  shared slot budget is left intact. The hash scoping stays generic so a second
+ *  review-tab consumer could coexist, but message replies are currently the only
+ *  one (the commenter moved to its own SW-driven post flow). Slots are not reset
+ *  here: `releaseReviewSlot` (on each tab load) and the stall backstop return them
+ *  to full when work drains, so a scoped reset never over- or under-counts the
+ *  shared budget. Without `baseHash`, the whole queue is wiped (legacy full reset). */
+export function resetReviewQueue(baseHash?: string): Promise<void> {
   return withLock(async () => {
-    await writeJob(freshJob());
+    if (baseHash == null) {
+      await writeJob(freshJob());
+      return;
+    }
+    const job = await readJob();
+    if (!job) return;
+    job.remaining = job.remaining.filter((u) => !hashMatches(u, baseHash));
+    await writeJob(job);
   });
 }
 
-/** Queue one conversation's thread URL to open as a review tab and pump. Creates a
- *  fresh job if none exists (e.g. the SW was evicted and lost the reset). */
-export function enqueueReviewTab(url: string): Promise<void> {
+/** Whether a queued tab URL (built by {@link tabUrl} as `<url>#<hash>`) belongs to
+ *  the feature identified by `baseHash` — i.e. its fragment starts with that hash.
+ *  Target URLs are fragment-free (normalized), so the last `#`-segment is the hash. */
+function hashMatches(tabbedUrl: string, baseHash: string): boolean {
+  const frag = tabbedUrl.split("#").pop() ?? "";
+  return frag.startsWith(baseHash);
+}
+
+/** Queue one target URL to open as a review tab and pump. `hash` selects the fill
+ *  path the opened tab runs — the default `FILL_HASH` pre-fills a message reply
+ *  (the only consumer today). Creates a fresh job if none exists (e.g. the SW was
+ *  evicted and lost the reset). */
+export function enqueueReviewTab(url: string, hash: string = FILL_HASH): Promise<void> {
   return withLock(async () => {
     const job = (await readJob()) ?? freshJob();
-    job.remaining.push(url);
+    job.remaining.push(tabUrl(url, hash));
     await pump(job);
   });
 }

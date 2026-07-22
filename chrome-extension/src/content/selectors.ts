@@ -73,6 +73,39 @@ export const DEFAULTS = {
   threadRow: '[class*="msg-conversation-listitem__link"]',
   /** Class token marking the conversation row currently open in the reading pane. */
   activeRowToken: "convo-item-link--active",
+
+  // ── Posts & comments (the LinkedIn commenter) ──────────────────────────────
+  /** A single post/update container in the feed or on a profile's recent-activity
+   *  page. Anchored on the update's activity URN attribute (stable) with a
+   *  class-based fallback, so the post's permalink can be derived from the URN. */
+  postContainer:
+    '[data-urn^="urn:li:activity"], [data-id^="urn:li:activity"], div.feed-shared-update-v2, div.fie-impression-container',
+  /** A post's main text body. */
+  postText:
+    '.update-components-text, .feed-shared-update-v2__description, [class*="update-components-text"]',
+  /** A post author's display name. */
+  postActorName:
+    '.update-components-actor__name, .update-components-actor__title span[dir="ltr"], .update-components-actor__title',
+  /** A post's ⋯ "open control menu" button (opens the menu holding "Copy link to
+   *  post"). Matched by its aria-label; the scrape falls back to a text/aria scan. */
+  postMenuButton:
+    'button[aria-label*="control menu" i], button[aria-label*="more actions" i], button[aria-label*="open options" i]',
+  /** The button that opens/focuses a post's comment composer. */
+  commentButton:
+    'button[aria-label*="comment" i], button.comment-button, button[aria-label*="Comment" i]',
+  /** The comment composer's editable text box (LinkedIn's ProseMirror editor). */
+  commentEditable:
+    '.comments-comment-box div.ProseMirror[contenteditable="true"], .comments-comment-texteditor [contenteditable="true"], div.ql-editor[contenteditable="true"], form.comments-comment-box__form [contenteditable="true"]',
+  /** The comment composer's submit ("Comment"/"Post") button — used to detect that
+   *  the user actually posted a drafted comment (vs. just having it placed). */
+  commentSubmit:
+    '.comments-comment-box__submit-button, button.comments-comment-box__submit-button--cr, form.comments-comment-box__form button[type="submit"], .comments-comment-texteditor button[type="submit"]',
+  /** The text body of a comment ALREADY posted in a post's comment thread — read to
+   *  detect that a comment we're about to place (or just submitted) is already there,
+   *  so we never post the same comment twice. Comment-scoped (never the post's own
+   *  body) so a post's text can't be mistaken for an existing comment. */
+  commentItemBody:
+    '.comments-comment-item__main-content, .comments-comment-entity__content, article.comments-comment-entity .update-components-text, .comments-comment-item .update-components-text, [class*="comments-comment-item"] [class*="comments-comment-item__main-content"], [class*="comment-entity"] [class*="update-components-text"]',
 } satisfies Record<string, SelectorValue>;
 
 export type SelectorKey = keyof typeof DEFAULTS;
@@ -105,6 +138,17 @@ export const DESCRIPTIONS: Record<SelectorKey, string> = {
   threadRow: "a clickable conversation row in the messaging thread list",
   activeRowToken:
     "the CSS class (bare token, no dot) marking the thread-list row currently open",
+  postContainer:
+    "a single post/update container in the feed or on a profile's recent-activity page — PREFER the element carrying the post's activity URN (an attribute like data-urn or data-id whose value is 'urn:li:activity:<digits>', or 'urn:li:ugcPost:'/'urn:li:share:'), so the post's permalink can be derived from it",
+  postText: "the main text body of a post/update",
+  postActorName: "the display name of the person or page that authored a post",
+  postMenuButton:
+    "a post's ⋯ 'open control menu' button (the menu that contains 'Copy link to post')",
+  commentButton: "the button that opens or focuses the comment composer under a post",
+  commentEditable: "the editable text box of a post's comment composer (where you type a comment)",
+  commentSubmit: "the submit button that posts a comment in the comment composer (labelled Comment or Post)",
+  commentItemBody:
+    "the text body of a comment that has ALREADY been posted under a post (a comment in the post's comment thread, NOT the post's own body text and NOT the composer where you type)",
 };
 
 // Live values = defaults with any fetched/healed overrides merged on top.
