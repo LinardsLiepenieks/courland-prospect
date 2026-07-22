@@ -29,6 +29,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("0015_create_selectors.sql"),
     include_str!("0016_add_snippet_status.sql"),
     include_str!("0017_add_snippet_position_category.sql"),
+    include_str!("0018_create_watched_profiles.sql"),
+    include_str!("0019_create_commented_posts.sql"),
+    include_str!("0020_create_comment_drafts.sql"),
+    include_str!("0021_recreate_commented_posts.sql"),
 ];
 
 /// Apply every migration newer than the database's current `user_version`,
