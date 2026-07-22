@@ -420,13 +420,23 @@ function writeIntoEditable(editable: HTMLElement, text: string): boolean {
 // this file — layered, fail-quiet, selectors centralized + healable.
 
 /** The activity URN carried on a post container (`urn:li:activity:…`, or a
- *  `ugcPost`/`share` variant), read from its `data-urn`/`data-id` attribute or a
- *  descendant carrying one. `null` when none is present. */
+ *  `ugcPost`/`share` variant), read from its own `data-urn`/`data-id`, the nearest
+ *  ANCESTOR carrying one, or a descendant. `null` when none is present.
+ *
+ *  The ancestor walk matters: the block we anchor scraping on is the
+ *  `data-display-contents="true"` "Feed post" wrapper, but LinkedIn hangs the post's
+ *  `data-urn` on the OUTER update container (`.feed-shared-update-v2`) that WRAPS
+ *  that block — so a descendant-only search missed it on most feed posts, forcing
+ *  the (unreliable) clipboard fallback. Checking `closest()` recovers the real
+ *  activity URN straight from the DOM, no clipboard needed. */
 function postUrn(container: HTMLElement): string | null {
   const re = /urn:li:(?:activity|ugcPost|share):\d+/;
   for (const attr of ["data-urn", "data-id"]) {
     const own = container.getAttribute(attr)?.match(re);
     if (own) return own[0];
+    // The update container this block lives inside (or the block itself).
+    const anc = container.closest(`[${attr}*="urn:li:"]`)?.getAttribute(attr)?.match(re);
+    if (anc) return anc[0];
     // Scan ALL descendants carrying this attr, not just the first: the first
     // `data-urn` under a container can be a non-post URN (a member/comment), while
     // a deeper element carries the real post URN — inspecting only the first would
@@ -468,10 +478,15 @@ function dedupeDoubled(s: string): string {
   return s;
 }
 
-/** The activity URN embedded in a post permalink (built by {@link permalinkFromUrn}),
- *  or `null` when the URL carries none. */
+/** The activity URN embedded in a post permalink, or `null` when the URL carries
+ *  none. Handles both the `/feed/update/urn:li:<type>:<id>/` form (built by
+ *  {@link permalinkFromUrn}) and a raw `/posts/…-<type>-<id>-<hash>/` slug, so the
+ *  post tab can still match a container even if a `/posts/` URL was stored directly. */
 function urnFromPostUrl(url: string): string | null {
-  return url.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0] ?? null;
+  const direct = url.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0];
+  if (direct) return direct;
+  const typed = url.match(/-(activity|ugcPost|share)-(\d{15,25})/);
+  return typed ? `urn:li:${typed[1]}:${typed[2]}` : null;
 }
 
 /**
@@ -497,9 +512,25 @@ export function postContainerForUrl(url: string): HTMLElement | null {
   // same safe outcome as before). When ids differ across URN types this matches
   // nothing, which is also safe.
   const id = urn.match(/:(\d+)$/)?.[1];
-  if (!id) return null;
-  const byId = containers.filter((c) => postUrn(c)?.endsWith(`:${id}`));
-  return byId.length === 1 ? byId[0] : null;
+  if (id) {
+    const byId = containers.filter((c) => postUrn(c)?.endsWith(`:${id}`));
+    if (byId.length === 1) return byId[0];
+  }
+  // Last resort: on the post's OWN permalink page (`/feed/update/<urn>/` or
+  // `/posts/<slug>/`) the target IS the primary post — the first update container in
+  // document order; recommended posts render after it. This rescues a valid link
+  // whose stored URN *type* differs from the container's (a `/posts/…-share-…` link
+  // vs the container's activity URN — different ids, so exact/id match can't hit).
+  // GATED to a real single-post permalink location so it can never fire on the feed
+  // and grab an arbitrary post. Requires a non-empty post body so a header/promo
+  // shell isn't mistaken for the post.
+  const path = location.pathname;
+  const onPermalinkPage = path.includes("/feed/update/") || path.includes("/posts/");
+  if (onPermalinkPage) {
+    const primary = containers.find((c) => postBodyText(c).length >= 30);
+    if (primary) return primary;
+  }
+  return null;
 }
 
 /** Canonicalize a post URL to `origin + pathname` with a trailing slash (dropping
@@ -552,26 +583,40 @@ function findPostContainers(): HTMLElement[] {
   return found;
 }
 
-/** Canonicalize any post URL/string to `/feed/update/urn:li:activity:<id>/` — the
- *  form the post tab matches on (see {@link postContainerForUrl}). Accepts a full
- *  `urn:li:…` token, or lifts the numeric activity id from a `/posts/…-activity-<id>`
- *  slug or a bare number. Empty when no id is present. */
+/** Canonicalize any post URL/string to `/feed/update/urn:li:<type>:<id>/` — the form
+ *  the post tab matches on (see {@link postContainerForUrl}). Accepts a full
+ *  `urn:li:…` token, or a `/posts/…-<type>-<id>-<hash>/` slug (LinkedIn's "Copy link
+ *  to post" form), PRESERVING the URN type. This is the fix for the invalid-link bug:
+ *  the copied `/posts/` slug carries the id as `-share-<id>-` or `-ugcPost-<id>-`, and
+ *  a share/ugcPost id is NOT an activity id — rebuilding it as `activity` produced a
+ *  `/feed/update/urn:li:activity:<shareId>/` that resolves to nothing and can't be
+ *  matched on the post tab. Only a bare id with no type context falls back to
+ *  `activity` (the common in-DOM feed case). Empty when no id is present. */
 export function canonicalPostPermalink(raw: string): string {
   const urn = raw.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0];
   if (urn) return normalizePostUrl(permalinkFromUrn(urn));
+  const typed = raw.match(/-(activity|ugcPost|share)-(\d{15,25})/);
+  if (typed) return normalizePostUrl(permalinkFromUrn(`urn:li:${typed[1]}:${typed[2]}`));
   const id = raw.match(/(\d{15,25})/)?.[1];
   if (id) return normalizePostUrl(permalinkFromUrn(`urn:li:activity:${id}`));
   return "";
 }
 
-/** A post's permalink straight from the DOM, when LinkedIn happens to expose it — the
- *  activity URN attribute, or an explicit `/feed/update/…` · `/posts/…` link in the
- *  block. Empty when neither is present (the common feed case), in which case the
- *  scrape falls back to the ⋯ "Copy link to post" clipboard capture. */
+/** A post's permalink straight from the DOM — the PRIMARY, clipboard-free path.
+ *  Prefers the post's activity URN (own/ancestor/descendant `data-urn`), which gives
+ *  the real `urn:li:activity:<id>` that both opens correctly and matches the post's
+ *  container when we go to comment. Falls back to any explicit `/feed/update/…` ·
+ *  `/posts/…` link exposed in the block or its enclosing update container (the
+ *  timestamp/permalink anchor). Empty only when the post exposes no link at all — a
+ *  now-rare case, since the ancestor `data-urn` walk covers the common feed post; the
+ *  clipboard ⋯-copy path is the last resort behind this. */
 export function postPermalink(container: HTMLElement): string {
   const urn = postUrn(container);
   if (urn) return normalizePostUrl(permalinkFromUrn(urn));
-  const a = container.querySelector<HTMLAnchorElement>(
+  // Search the enclosing update container too — the timestamp/permalink anchor often
+  // sits outside the "Feed post" a11y block we anchor on.
+  const scope = container.closest<HTMLElement>(selStr("postContainer")) ?? container;
+  const a = scope.querySelector<HTMLAnchorElement>(
     'a[href*="/feed/update/"], a[href*="/posts/"]',
   );
   return a ? canonicalPostPermalink(a.getAttribute("href") ?? "") : "";

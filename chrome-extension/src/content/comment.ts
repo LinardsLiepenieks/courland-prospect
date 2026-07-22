@@ -44,10 +44,25 @@ import { DRAFT_NS_POST } from "../lib/storageKeys";
 import type { ScrapedPost } from "../lib/types";
 
 // ── Scrape tab: collect posts + their permalinks ─────────────────────────────
-// Mirrors the reference scraper's interactive loop: LinkedIn's feed doesn't expose
-// post permalinks in the DOM, so we walk posts ONE AT A TIME — find the next post,
-// read its text/author, capture its link (its ⋯ "Copy link to post" → clipboard),
-// then move on, scrolling to load more — until we have the target count or run out.
+// Walk posts ONE AT A TIME — find the next post, read its text/author, capture its
+// link, then move on, scrolling to load more, until we hit the target count or run
+// out. Link capture is DOM-FIRST: the post's activity URN is read straight off the
+// DOM (its own / ancestor `data-urn`, or a `/feed/update/`·`/posts/` anchor), which
+// needs no clipboard and yields the real `urn:li:activity:<id>`. The ⋯ "Copy link to
+// post" → clipboard route is only a last-resort fallback: a content script can't get
+// the user-activation the async clipboard API demands, so those reads time out here
+// (the reference tool avoids this by driving Chrome over CDP with granted clipboard
+// permission — a path our no-CDP design doesn't have).
+
+/** Scrape diagnostics — when true, logs per-post capture outcomes to the scrape
+ *  tab's console (prefix `[cp-scrape]`) so a low yield / bad link can be traced to
+ *  its cause (no DOM URN, menu didn't open, clipboard didn't change, etc.). Kept in
+ *  place (off by default) because post capture is a fragile surface worth being able
+ *  to inspect quickly — flip to `true` and rebuild to trace a bad run. */
+const SCRAPE_DEBUG = false;
+function dbg(...args: unknown[]): void {
+  if (SCRAPE_DEBUG) console.debug("[cp-scrape]", ...args);
+}
 
 /** Let a freshly-opened scrape tab settle (SPA render) before reading it. */
 const SCRAPE_SETTLE_MS = 3000;
@@ -58,10 +73,13 @@ const SCRAPE_MAX_SCROLLS = 40;
 const SCRAPE_DEADLINE_MS = 90_000;
 /** Waits around the ⋯-menu / copy-link interaction (LinkedIn animates the menu). */
 const MENU_OPEN_WAIT_MS = 800;
-/** How long to wait for "Copy link" to actually write the clipboard, and how often
- *  to poll. We accept only a value that CHANGED from the pre-click snapshot, so a
+/** How long to wait for the clipboard fallback to yield a FRESH value, and how often
+ *  to poll. Kept short because this path reliably fails in a content script (no user
+ *  activation for the async clipboard API) — the DOM path is the real source, so we
+ *  don't want a dead fallback eating the scrape's wall-clock budget per post.
+ *  We accept only a value that CHANGED from the pre-click snapshot, so a
  *  slow copy can't leave us reading (and mis-pairing) a stale URL. */
-const COPY_CHANGE_DEADLINE_MS = 2_500;
+const COPY_CHANGE_DEADLINE_MS = 1_200;
 const COPY_POLL_MS = 150;
 
 /**
@@ -132,15 +150,30 @@ async function collectPosts(target: number): Promise<ScrapedPost[]> {
       continue;
     }
     sawAnyContainer = true;
-    if (isPromotedBlock(block)) continue; // ad — skip, no link
+    if (isPromotedBlock(block)) {
+      dbg("skip: promoted/ad block");
+      continue; // ad — skip, no link
+    }
     const text = postBodyText(block);
-    if (!text || text.length < 30) continue; // non-post / too thin to comment on
+    if (!text || text.length < 30) {
+      dbg("skip: text too thin", { len: text?.length ?? 0 });
+      continue; // non-post / too thin to comment on
+    }
     const permalink = await capturePostLink(block);
-    if (!permalink || seenPermalinks.has(permalink)) continue;
+    if (!permalink) {
+      dbg("skip: no permalink captured", { textStart: text.slice(0, 60) });
+      continue;
+    }
+    if (seenPermalinks.has(permalink)) {
+      dbg("skip: duplicate permalink", { permalink });
+      continue;
+    }
     seenPermalinks.add(permalink);
+    dbg("captured", { n: posts.length + 1, permalink });
     posts.push({ permalink, author_name: postAuthorName(block), text });
     await delay(400 + Math.random() * 300);
   }
+  dbg("done", { captured: posts.length, target, scrolls, guard, sawAnyContainer });
   return posts;
 }
 
@@ -153,7 +186,10 @@ async function collectPosts(target: number): Promise<ScrapedPost[]> {
  */
 async function capturePostLink(block: HTMLElement): Promise<string> {
   const dom = postPermalink(block);
-  if (dom) return dom;
+  if (dom) {
+    dbg("link via DOM urn", { dom });
+    return dom;
+  }
   try {
     // Clear any menu still open from the previous post BEFORE opening this one, so
     // its "Copy link" item can't be the one that gets clicked.
@@ -163,20 +199,35 @@ async function capturePostLink(block: HTMLElement): Promise<string> {
     // clipboard still holds the prior value — accepting that would pair this post's
     // text with another post's link. We take only a value that actually changed.
     const before = await readClipboard();
-    if (!openPostControlMenu(block)) return "";
+    if (!openPostControlMenu(block)) {
+      dbg("copy path: ⋯ control-menu button not found");
+      return "";
+    }
     await delay(MENU_OPEN_WAIT_MS);
     if (!clickCopyLinkItem()) {
+      dbg("copy path: 'Copy link to post' item not found in open menu");
       closeOpenMenu();
       return "";
     }
     const raw = await readClipboardCopied(before);
     closeOpenMenu();
-    const url = (raw || "").split("?")[0].trim();
-    if (url.includes("linkedin.com/posts/") || url.includes("/feed/update/")) {
-      return canonicalPostPermalink(url);
+    if (!raw) {
+      // Either the clipboard never changed (copy silently failed) or reading it was
+      // blocked. Clipboard reads from a content script need the tab focused and can
+      // be denied — if this is the common case, the DOM-URN path is the reliable one.
+      dbg("copy path: clipboard didn't yield a fresh value", { beforeLen: before.length });
+      return "";
     }
+    const url = raw.split("?")[0].trim();
+    if (url.includes("linkedin.com/posts/") || url.includes("/feed/update/")) {
+      const canonical = canonicalPostPermalink(url);
+      dbg("link via clipboard", { raw: url, canonical });
+      return canonical;
+    }
+    dbg("copy path: clipboard value isn't a post URL", { raw: url.slice(0, 80) });
     return "";
-  } catch {
+  } catch (e) {
+    dbg("copy path: threw", { error: e instanceof Error ? e.message : String(e) });
     closeOpenMenu();
     return "";
   }
