@@ -16,5 +16,6 @@ pub mod commands;
 pub mod prompt;
 
 pub use prompt::{
-    BrokenSelector, ClassifyContext, DraftContext, DraftMessage, Prompt, ProposeContext,
+    comment_is_skip, BrokenSelector, ClassifyContext, CommentContext, DraftContext, DraftMessage,
+    DraftSnippet, Prompt, ProposeContext, ReviewContext,
 };
