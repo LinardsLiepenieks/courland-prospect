@@ -26,6 +26,80 @@
   list-style: none;
 }
 
+/* ── Stage section header (a collapsible conversation-stage group) ─────────
+   The cards themselves are flat siblings in the list (keyed by id, so a re-stage
+   moves a card in place rather than remounting it); this is just the header row
+   that toggles the run of cards below it, hidden via `hidden` when collapsed. */
+.sectionRow {
+  /* A touch more air above a stage than the 12px inter-card gap, so the header
+     reads as the start of a group. */
+  margin-top: 2px;
+}
+
+/* A quiet header — the stage label reads as a section eyebrow, not a card. */
+.sectionToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 2px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  text-align: left;
+  outline: none;
+}
+
+.sectionChevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 160ms var(--ease-out);
+}
+
+.sectionChevron[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+
+.sectionToggle:hover .sectionChevron {
+  color: var(--text-muted);
+}
+
+.sectionToggle:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.sectionName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sectionName[data-uncat] {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.sectionCount {
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 1px 6px;
+  color: var(--text-faint);
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
 /* ── Card ────────────────────────────────────────────────── */
 /* Shared shell for both the editable and the proposed card: the box metrics and
    entrance are identical; each variant layers on its own surface/border/motion. */
@@ -128,25 +202,6 @@
 .titleText[data-untitled] {
   color: var(--text-faint);
   font-weight: 500;
-}
-
-/* Compact, read-only echo of the category on a collapsed row (the editable chip
-   lives in the expanded body). */
-.miniCat {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  max-width: 40%;
-  padding: 2px 8px;
-  color: var(--text-muted);
-  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 550;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Name field, shown when expanded — no chrome until you're in it. */
@@ -529,10 +584,8 @@
   background: var(--accent);
 }
 
-/* Hollow dot = AI-suggested category; filled = hand-picked. Shared by the
-   collapsed mini-pill and the expanded editable chip. */
-.categoryChip[data-manual="false"] .categoryDot,
-.miniCat[data-manual="false"] .categoryDot {
+/* Hollow dot = AI-suggested stage; filled = hand-picked. */
+.categoryChip[data-manual="false"] .categoryDot {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
 }
@@ -546,18 +599,33 @@
   white-space: nowrap;
 }
 
-.categoryInput {
-  min-width: 0;
-  max-width: 60%;
-  padding: 3px 9px;
+/* ── Category combobox (inside the Popover) ──────────────── */
+/* The "type a new stage" field sits at the top of the move-to menu. */
+.comboField {
+  padding: 4px 6px 6px;
+}
+
+.comboInput {
+  width: 100%;
+  padding: 6px 9px;
   color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  box-shadow: var(--focus-ring);
-  font-size: 12px;
-  font-weight: 550;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  font-size: 13px;
   outline: none;
+  transition:
+    border-color 140ms var(--ease-out),
+    box-shadow 140ms var(--ease-out);
+}
+
+.comboInput:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.comboInput::placeholder {
+  color: var(--text-faint);
 }
 
 .cardError {
@@ -624,6 +692,103 @@
   opacity: 0.5;
 }
 
+/* ── Re-score & re-categorize toolbar ────────────────────── */
+.toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Quiet outcome line after a finished re-score ("Re-scored N snippets"). */
+.rescoreNote {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: right;
+}
+
+.rescoreBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 550;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.rescoreBtn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.rescoreBtn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.rescoreBtn:disabled {
+  opacity: 0.6;
+}
+
+.rescoreConfirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rescoreWarn {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.rescoreGoBtn {
+  flex-shrink: 0;
+  padding: 5px 11px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.rescoreGoBtn:hover {
+  background: var(--accent-hover);
+}
+
+.rescoreGoBtn:active {
+  transform: scale(0.97);
+}
+
+/* Progress spinner shown while a re-score runs. */
+.spinner {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  animation: spin 600ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .card,
   .proposed,
@@ -635,9 +800,10 @@
       border-color 150ms var(--ease-out),
       box-shadow 150ms var(--ease-out);
   }
-  /* Snap the collapsible and chevron rather than sliding/rotating. */
+  /* Snap the collapsibles and chevrons rather than sliding/rotating. */
   .bodyWrap,
-  .chevronBtn {
+  .chevronBtn,
+  .sectionChevron {
     transition: none;
   }
   .menuBtn:active:not(:disabled),

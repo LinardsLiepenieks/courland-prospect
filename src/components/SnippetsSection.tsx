@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   approveSnippet,
   copySnippet,
@@ -6,6 +6,7 @@ import {
   deleteSnippet,
   listSnippets,
   onSnippetsChanged,
+  reclassifySnippets,
   setSnippetCategory,
   updateSnippet,
   type Snippet,
@@ -32,6 +33,41 @@ interface CopyTarget {
   name: string;
 }
 
+/** One conversation-stage section: the category label and the snippets in it. */
+interface StageGroup {
+  category: string;
+  items: Snippet[];
+}
+
+/** Group approved snippets into conversation-stage sections, ordered along the arc.
+ *  Each snippet's `category` is its stage; `position` orders the sections (a group
+ *  sits at its earliest snippet's position, so Opener-type stages float to the top
+ *  and Close-type ones sink) and the snippets within them. Uncategorized snippets
+ *  (blank category) always land in a final catch-all section. The incoming list is
+ *  already position-sorted by the backend, so per-group order is preserved as-is. */
+function groupByStage(approved: Snippet[]): StageGroup[] {
+  const map = new Map<string, Snippet[]>();
+  for (const s of approved) {
+    const key = s.category.trim();
+    const bucket = map.get(key);
+    if (bucket) bucket.push(s);
+    else map.set(key, [s]);
+  }
+  return [...map.entries()]
+    .map(([category, items]) => ({
+      category,
+      items,
+      minPos: Math.min(...items.map((s) => s.position)),
+    }))
+    .sort((a, b) => {
+      // Uncategorized sinks below every named stage; otherwise order along the arc.
+      if (a.category === "") return 1;
+      if (b.category === "") return -1;
+      return a.minPos - b.minPos;
+    })
+    .map(({ category, items }) => ({ category, items }));
+}
+
 /**
  * The Snippets editor, reused in both the Profile tab (`pitchId={null}`) and a
  * pitch's Settings tab (`pitchId={pitch.id}`). Proposed (AI-suggested) snippets
@@ -49,6 +85,36 @@ export default function SnippetsSection({ pitchId }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped by the retry button to re-run the load after a failure.
   const [reloadKey, setReloadKey] = useState(0);
+  // The "re-score & re-categorize everything" action: a confirm gate plus its own
+  // async-action (busy flag + caught error + re-entry guard); the component stays
+  // mounted across the batch, so `useAsyncAction`'s finally-reset contract fits.
+  const [confirmingReclassify, setConfirmingReclassify] = useState(false);
+  // Which stage sections are OPEN (by category label). Sections are closed by
+  // default (a stage absent from the set is collapsed), so the library reads as a
+  // tidy list of stage headers you open on demand. Held here, not per section, so a
+  // card stays a sibling in one flat list keyed by id — a background re-stage moves
+  // it in place rather than remounting it (which would drop focus and in-flight
+  // edits).
+  const [openStages, setOpenStages] = useState<ReadonlySet<string>>(new Set());
+  // The card the user is actively working in (just added, expanded, or editing). Its
+  // stage section is force-shown even when collapsed, so a background re-stage that
+  // moves the card into a closed section can't hide it (and blur it) mid-edit. Cleared
+  // when the user manually toggles a section (they've taken control of what's open).
+  const [activeSnippetId, setActiveSnippetId] = useState<number | null>(null);
+  // Outcome line for a finished re-score ("Re-scored N snippets") — the batch returns a
+  // count that would otherwise be discarded. Cleared when a new re-score starts.
+  const [reclassifyNote, setReclassifyNote] = useState<string | null>(null);
+  // Set true when a re-score finishes so the next loaded list opens every stage section.
+  // Re-scoring re-homes cards across sections, which are collapsed by default, so without
+  // this the freshly organized library would look empty.
+  const [expandAllOnNextLoad, setExpandAllOnNextLoad] = useState(false);
+  // Stable base for the per-section header ids that link each card to its stage (a11y).
+  const sectionIdBase = useId();
+  const {
+    busy: reclassifying,
+    error: reclassifyError,
+    run: runReclassify,
+  } = useAsyncAction();
   const { busy: adding, error, run } = useAsyncAction();
   // Tracks the latest issued load so an older, slower response can't overwrite it.
   const fetchSeq = useRef(0);
@@ -123,14 +189,33 @@ export default function SnippetsSection({ pitchId }: Props) {
     };
   }, [pitchId, loadSnippets]);
 
+  // After a re-score lands its reorganized list, open every stage section so nothing
+  // hides. Cards re-home across sections during a re-score and sections are collapsed by
+  // default, so otherwise the reorganized library would read as empty. One-shot, cleared
+  // once applied so ordinary background refreshes don't force sections open.
+  useEffect(() => {
+    if (!expandAllOnNextLoad || !snippets) return;
+    const cats = new Set<string>();
+    for (const s of snippets) {
+      if (s.status === "approved") cats.add(s.category.trim());
+    }
+    setOpenStages(cats);
+    setExpandAllOnNextLoad(false);
+  }, [expandAllOnNextLoad, snippets]);
+
   function handleAdd() {
     run(async () => {
       const created = await createSnippet(pitchId);
+      // Mark it active so its section stays shown even after the classify pass
+      // re-homes it out of Uncategorized — otherwise, with sections closed by
+      // default, the card you're meant to type into would vanish mid-edit.
+      setActiveSnippetId(created.id);
       // Guard against a live-refresh (`snippets://changed`) having already folded
       // this row in — the created snippet is committed before this resolves, so a
       // concurrent refetch can beat us here; dropping the duplicate avoids a double
-      // card / duplicate React key. A blank card sorts to the top of the approved
-      // list (mid-arc, newest) and opens expanded so you type straight into it.
+      // card / duplicate React key. A blank card (empty category) lands in the
+      // Uncategorized section and opens expanded + autofocused, so `autoFocus`
+      // scrolls it into view to type straight into.
       setSnippets((prev) =>
         prev?.some((s) => s.id === created.id)
           ? prev
@@ -166,6 +251,44 @@ export default function SnippetsSection({ pitchId }: Props) {
   // backend's `snippets://changed` event.
   async function handleCopy(id: number, targetId: number | null) {
     await copySnippet(id, targetId);
+  }
+
+  // Re-score + re-categorize the whole scope. Resolves once the batch finishes (the
+  // backend emits `snippets://changed` once at the end for any OTHER open editor; this
+  // window reloads itself here). The reload runs in a `finally` so a batch that applied
+  // some rows and then errored still shows the DB's real state, not a stale list — and
+  // sets `expandAllOnNextLoad` so the reorganized, re-homed cards don't hide in the
+  // collapsed sections they moved into.
+  function handleReclassify() {
+    setConfirmingReclassify(false);
+    setReclassifyNote(null);
+    runReclassify(async () => {
+      try {
+        const changed = await reclassifySnippets(pitchId);
+        setReclassifyNote(
+          changed > 0
+            ? `Re-scored ${changed} snippet${changed === 1 ? "" : "s"}.`
+            : "Everything was already up to date.",
+        );
+      } finally {
+        setExpandAllOnNextLoad(true);
+        loadSnippets();
+      }
+    });
+  }
+
+  // Set a stage section's open state explicitly (the caller passes the desired
+  // state from what's currently on screen). Clearing the active-card override first
+  // means one click always matches the visible state — even for a section that was
+  // open only because it held the active card.
+  function setStageOpen(category: string, open: boolean) {
+    setActiveSnippetId(null);
+    setOpenStages((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(category);
+      else next.delete(category);
+      return next;
+    });
   }
 
   // The scope's distinct categories (for the chip typeahead), derived from approved
@@ -242,7 +365,58 @@ export default function SnippetsSection({ pitchId }: Props) {
         Add snippet
       </button>
 
+      {approved.length >= 2 && (
+        <div className={styles.toolbar}>
+          {confirmingReclassify ? (
+            <div className={styles.rescoreConfirm}>
+              <span className={styles.rescoreWarn}>
+                Re-score all {approved.length}? This overwrites categories you set by hand.
+              </span>
+              <button
+                type="button"
+                className={styles.secondaryBtn}
+                onClick={() => setConfirmingReclassify(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.rescoreGoBtn}
+                onClick={handleReclassify}
+              >
+                Re-score
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={styles.rescoreBtn}
+              onClick={() => setConfirmingReclassify(true)}
+              disabled={reclassifying || adding}
+            >
+              {reclassifying ? (
+                <>
+                  <span className={styles.spinner} aria-hidden="true" />
+                  Re-scoring…
+                </>
+              ) : (
+                <>
+                  <SparkIcon />
+                  Re-score &amp; re-categorize
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      )}
+
       {error && <div className={styles.error}>{error}</div>}
+      {reclassifyError && <div className={styles.error}>{reclassifyError}</div>}
+      {reclassifyNote && !reclassifying && (
+        <div className={styles.rescoreNote} role="status">
+          {reclassifyNote}
+        </div>
+      )}
 
       {snippets.length === 0 ? (
         <p className={styles.empty}>
@@ -260,18 +434,69 @@ export default function SnippetsSection({ pitchId }: Props) {
             </li>
           ))}
 
-          {approved.map((s) => (
-            <li key={s.id}>
-              <SnippetCard
-                snippet={s}
-                categories={categories}
-                copyTargets={copyTargets}
-                onDelete={handleDelete}
-                onSetCategory={handleSetCategory}
-                onCopy={handleCopy}
-              />
-            </li>
-          ))}
+          {groupByStage(approved).flatMap((group, i) => {
+            // Open if the user opened it, or if it holds the card being worked in —
+            // the latter keeps an active card visible through a background re-stage,
+            // in the same render, so it never flashes hidden or loses focus.
+            const collapsed =
+              !openStages.has(group.category) &&
+              !group.items.some((s) => s.id === activeSnippetId);
+            const uncategorized = group.category === "";
+            // Ties each card back to its stage header for screen readers: the header
+            // and cards are flat siblings (so a re-stage moves a card without a remount),
+            // so the grouping is only visual unless the cards point at the header.
+            const headerId = `${sectionIdBase}-sec-${i}`;
+            return [
+              <li
+                // `cat:` namespaces real stages so the empty-category sentinel can't
+                // collide with a stage a user literally named "uncategorized".
+                key={uncategorized ? "stage-uncategorized" : `cat:${group.category}`}
+                className={styles.sectionRow}
+              >
+                <button
+                  type="button"
+                  id={headerId}
+                  className={styles.sectionToggle}
+                  onClick={() => setStageOpen(group.category, collapsed)}
+                  aria-expanded={!collapsed}
+                >
+                  <span className={styles.sectionChevron} data-expanded={!collapsed}>
+                    <Chevron />
+                  </span>
+                  <span
+                    className={styles.sectionName}
+                    data-uncat={uncategorized || undefined}
+                  >
+                    {uncategorized ? "Uncategorized" : group.category}
+                  </span>
+                  <span className={styles.sectionCount}>{group.items.length}</span>
+                </button>
+              </li>,
+              // Cards stay siblings in this one <ul>, keyed by id — so a background
+              // re-stage moves a card between sections in place instead of remounting
+              // it. Collapsing hides the run via `hidden` (no unmount, no lost edits).
+              // `role=group` + `aria-labelledby` restore the stage association a screen
+              // reader would otherwise lose (the collapsed card carries no stage text).
+              ...group.items.map((s) => (
+                <li
+                  key={s.id}
+                  hidden={collapsed}
+                  role="group"
+                  aria-labelledby={headerId}
+                >
+                  <SnippetCard
+                    snippet={s}
+                    categories={categories}
+                    copyTargets={copyTargets}
+                    onDelete={handleDelete}
+                    onSetCategory={handleSetCategory}
+                    onCopy={handleCopy}
+                    onActivity={setActiveSnippetId}
+                  />
+                </li>
+              )),
+            ];
+          })}
         </ul>
       )}
 
@@ -302,6 +527,7 @@ function SnippetCard({
   onDelete,
   onSetCategory,
   onCopy,
+  onActivity,
 }: {
   snippet: Snippet;
   categories: string[];
@@ -309,6 +535,9 @@ function SnippetCard({
   onDelete: (id: number) => Promise<void>;
   onSetCategory: (id: number, category: string) => Promise<void>;
   onCopy: (id: number, targetId: number | null) => Promise<void>;
+  /** Mark this card as the one being worked in (expanded / edited), so its stage
+   *  section stays open through a background re-stage. */
+  onActivity: (id: number) => void;
 }) {
   const [name, setName] = useState(snippet.name);
   const [content, setContent] = useState(snippet.content);
@@ -394,7 +623,10 @@ function SnippetCard({
         <button
           type="button"
           className={styles.chevronBtn}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => {
+            setExpanded((v) => !v);
+            onActivity(snippet.id);
+          }}
           aria-expanded={expanded}
           aria-controls={bodyId}
           aria-label={`${expanded ? "Collapse" : "Expand"} ${title}`}
@@ -407,7 +639,10 @@ function SnippetCard({
           <input
             className={styles.nameInput}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value);
+              onActivity(snippet.id);
+            }}
             placeholder="Snippet name"
             aria-label="Snippet name"
             disabled={deleting}
@@ -421,7 +656,10 @@ function SnippetCard({
           <button
             type="button"
             className={styles.headToggle}
-            onClick={() => setExpanded(true)}
+            onClick={() => {
+              setExpanded(true);
+              onActivity(snippet.id);
+            }}
             tabIndex={-1}
             disabled={deleting}
           >
@@ -431,16 +669,6 @@ function SnippetCard({
             >
               {title}
             </span>
-            {snippet.category.trim() && (
-              <span
-                className={styles.miniCat}
-                data-manual={snippet.manual}
-                title={`Category: ${snippet.category}`}
-              >
-                <span className={styles.categoryDot} aria-hidden="true" />
-                {snippet.category}
-              </span>
-            )}
           </button>
         )}
 
@@ -528,7 +756,10 @@ function SnippetCard({
             id={bodyId}
             className={styles.contentInput}
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={(e) => {
+              setContent(e.target.value);
+              onActivity(snippet.id);
+            }}
             placeholder="What this snippet says… use [brackets] for blanks the AI fills in, like [first name]"
             aria-label="Snippet content"
             disabled={deleting}
@@ -565,6 +796,18 @@ function Chevron() {
   );
 }
 
+function SparkIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"
+        fill="currentColor"
+      />
+      <path d="M18.5 14.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ProfileIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -594,11 +837,11 @@ function PitchIcon() {
 }
 
 /**
- * The category chip on a snippet card — the manual override. Shows the current
- * category (AI-derived or hand-picked); clicking opens an inline field with a
- * typeahead over the scope's existing categories. Committing a value pins the
- * snippet (the AI won't re-categorize it); clearing it re-enables auto. A subtle
- * dot marks a manual (hand-picked) category vs. an AI-suggested one.
+ * The category (conversation-stage) editor on a snippet card. Shows the current stage
+ * (AI-derived or hand-picked); clicking opens a combobox: type a NEW stage, or pick
+ * an EXISTING one to move the snippet to another section. Setting a stage pins the
+ * snippet (the per-edit AI pass won't re-categorize it); "Clear" re-enables auto. A
+ * subtle dot marks a manual (hand-picked) stage vs. an AI-suggested one.
  */
 function CategoryChip({
   snippet,
@@ -611,79 +854,53 @@ function CategoryChip({
   onSet: (id: number, category: string) => Promise<void>;
   disabled: boolean;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(snippet.category);
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const listId = `cats-${snippet.id}`;
+  const chipRef = useRef<HTMLButtonElement>(null);
 
-  async function commit() {
-    const next = value.trim();
-    setEditing(false);
-    if (next === snippet.category) return; // unchanged — no write
+  async function apply(next: string) {
+    const v = next.trim();
+    setOpen(false);
+    if (v === snippet.category) return; // unchanged — no write
     setBusy(true);
     setError(null);
     try {
-      await onSet(snippet.id, next);
-      // Parent reloads; this card re-renders with the new value.
+      await onSet(snippet.id, v);
+      // Parent reloads; the snippet re-renders (and re-homes to its new section).
     } catch (err) {
-      // Surface the failure (matching the delete/approve cards) instead of a
-      // silent revert, so a rejected write isn't mistaken for a save.
+      // Surface the failure (matching the delete/approve cards) instead of a silent
+      // revert, so a rejected write isn't mistaken for a save.
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
   }
 
-  if (editing) {
-    return (
-      <>
-        <input
-          className={styles.categoryInput}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onBlur={() => void commit()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              void commit();
-            } else if (e.key === "Escape") {
-              setValue(snippet.category);
-              setEditing(false);
-            }
-          }}
-          list={listId}
-          placeholder="Category"
-          aria-label="Snippet category"
-          // eslint-disable-next-line jsx-a11y/no-autofocus
-          autoFocus
-        />
-        <datalist id={listId}>
-          {categories.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
-      </>
-    );
-  }
+  // Existing stages you can move to — the current one is excluded (it's a no-op).
+  const others = categories.filter((c) => c !== snippet.category);
 
   return (
     <>
       <button
+        ref={chipRef}
         type="button"
         className={styles.categoryChip}
         data-empty={snippet.category.trim() === ""}
         data-manual={snippet.manual}
         onClick={() => {
           setError(null);
-          setValue(snippet.category);
-          setEditing(true);
+          setValue("");
+          setOpen((o) => !o);
         }}
         disabled={disabled || busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
         title={
           snippet.manual
-            ? "Category set by you — click to change"
-            : "AI-suggested category — click to change"
+            ? "Stage set by you — click to change"
+            : "AI-suggested stage — click to change"
         }
       >
         {snippet.category.trim() ? (
@@ -692,9 +909,42 @@ function CategoryChip({
             {snippet.category}
           </>
         ) : (
-          "＋ Category"
+          "＋ Stage"
         )}
       </button>
+
+      <Popover open={open} onClose={() => setOpen(false)} anchorRef={chipRef}>
+        <div className={styles.comboField}>
+          <input
+            className={styles.comboInput}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (value.trim()) void apply(value);
+              } else if (e.key === "Escape") {
+                setOpen(false);
+              }
+            }}
+            placeholder="New stage…"
+            aria-label="New stage"
+            // eslint-disable-next-line jsx-a11y/no-autofocus
+            autoFocus
+          />
+        </div>
+        {others.length > 0 && <div className={styles.menuLabel}>Move to</div>}
+        {others.map((c) => (
+          <MenuItem key={c} label={c} onSelect={() => void apply(c)} />
+        ))}
+        {snippet.category.trim() && (
+          <>
+            <div className={styles.menuDivider} role="separator" />
+            <MenuItem label="Clear stage" danger onSelect={() => void apply("")} />
+          </>
+        )}
+      </Popover>
+
       {error && <span className={styles.chipError}>{error}</span>}
     </>
   );

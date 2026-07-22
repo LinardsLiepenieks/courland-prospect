@@ -84,6 +84,17 @@ export function copySnippet(
   return invoke("copy_snippet", { id, targetPitchId });
 }
 
+/** Re-score and re-categorize every approved snippet in a scope through the AI — the
+ *  "reorganize my whole library" action. A full reset: it overwrites hand-picked
+ *  categories and hands each snippet back to auto-classification. Resolves when the
+ *  whole batch finishes, with the number of snippets changed; the backend fires a
+ *  single `snippets://changed` event at the end (not one per snippet), so OTHER open
+ *  editors for the scope reconcile in one reshuffle — this caller reloads off its own
+ *  resolution. `pitchId` is `null` for the profile scope, a pitch id otherwise. */
+export function reclassifySnippets(pitchId: number | null): Promise<number> {
+  return invoke("reclassify_snippets", { pitchId });
+}
+
 /** Subscribe to backend "snippets changed" pushes — fired when a background pass
  *  changes a scope's snippets (a new proposal lands, or a classify pass updates a
  *  snippet's position/category). The payload is the affected scope: a pitch id, or
