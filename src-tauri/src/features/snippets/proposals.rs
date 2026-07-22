@@ -15,9 +15,19 @@
 //! Two hard guarantees are enforced in code, not left to the model:
 //!   - **Verbatim** — a proposal's content must appear (whitespace-normalized) in the
 //!     message the user actually sent, or it's discarded ([`is_verbatim`]).
-//!   - **No duplicates** — a proposal whose content already exists on the pitch (any
-//!     status) is skipped; the dedup read and the insert share one connection lock,
-//!     so concurrent passes can't both insert the same text ([`run_one`]).
+//!   - **No exact duplicates** — a proposal whose content already exists on the pitch
+//!     (any status) is skipped; the dedup read and the insert share one connection
+//!     lock, so concurrent passes can't both insert the same text ([`run_one`]).
+//!
+//! Between extraction and insert sits a second, best-effort LLM pass — the reviewer
+//! ([`review_candidates`]). `propose` is generative and errs toward proposing; the
+//! reviewer gates each candidate on the two axes the generator is weakest at:
+//! reusability (a line that only makes sense in one conversation is rejected) and
+//! *semantic* duplication (a line an existing snippet already conveys, even if worded
+//! differently — which the exact-match dedup above can't catch). The reviewer is an
+//! enhancement, not a guarantee: no spare CLI capacity skips the whole pass (the
+//! phrase re-proposes next send), and an error or unparseable verdict degrades to the
+//! un-reviewed set rather than dropping good candidates.
 
 use std::collections::HashMap;
 
@@ -25,7 +35,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::repository;
 use super::SNIPPETS_CHANGED;
-use crate::ai::{self, Prompt, ProposeContext};
+use crate::ai::{self, Prompt, ProposeContext, ReviewContext};
 use crate::database::AppState;
 use crate::features::messages::repository::NewOutgoing;
 use crate::features::{pitches, prospects};
@@ -133,6 +143,19 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
         return;
     }
 
+    // Reviewer gate: a second LLM pass judges each candidate against the pitch and the
+    // existing library, rejecting one-off (conversation-specific) lines and semantic
+    // duplicates the exact-match dedup below can't catch. `None` = no spare CLI
+    // capacity, so skip the whole pass and let the phrase re-propose on the next send.
+    let candidates = match review_candidates(&pitch_name, &pitch_skill, &existing, candidates).await
+    {
+        Some(kept) => kept,
+        None => return,
+    };
+    if candidates.is_empty() {
+        return; // reviewer rejected everything — nothing to insert
+    }
+
     // Dedup against the pitch's existing contents and insert — one lock, so a
     // concurrent pass can't slip an identical proposal in between our check and
     // insert. Also dedups within this batch itself.
@@ -172,6 +195,47 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
         }
         Ok(Err(e)) => eprintln!("snippets: propose insert failed: {e}"),
         Err(e) => eprintln!("snippets: propose insert task panicked: {e}"),
+    }
+}
+
+/// The reviewer gate: run the extracted `candidates` through a second LLM pass and
+/// return the survivors. Returns `Some(kept)` on a decision (including `Some(vec![])`
+/// when everything was rejected), and `None` ONLY when there's no spare CLI capacity —
+/// the caller treats that as "skip, retry next send". A generation error or an
+/// unparseable verdict degrades to `Some(candidates)` (the un-reviewed set), so a
+/// reviewer hiccup never silently discards genuinely-new material.
+async fn review_candidates(
+    pitch_name: &str,
+    pitch_skill: &str,
+    existing: &[(String, String)],
+    candidates: Vec<(String, String)>,
+) -> Option<Vec<(String, String)>> {
+    let ctx = ReviewContext {
+        pitch_name,
+        pitch_skill,
+        existing_snippets: existing,
+        candidates: &candidates,
+    };
+    let raw = match ai::client::run_capped_background(Prompt::review_proposals(&ctx)).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return None, // no capacity — caller skips and retries on next send
+        Err(e) => {
+            eprintln!("snippets: propose review generation failed: {e}");
+            return Some(candidates); // degrade: keep the verbatim+deduped set un-reviewed
+        }
+    };
+    match parse_review(&raw, candidates.len()) {
+        Some(verdicts) => Some(
+            candidates
+                .into_iter()
+                .zip(verdicts)
+                .filter_map(|(c, keep)| keep.then_some(c))
+                .collect(),
+        ),
+        None => {
+            eprintln!("snippets: propose review returned no parseable verdicts; keeping candidates");
+            Some(candidates) // degrade rather than drop
+        }
     }
 }
 
@@ -221,6 +285,38 @@ fn parse_proposals(raw: &str) -> Vec<(String, String)> {
         out.push((name.to_string(), content.to_string()));
     }
     out
+}
+
+/// Parse the reviewer's reply into one keep/reject verdict per candidate. Tolerant
+/// like [`parse_proposals`]: it finds the outermost JSON array (allowing surrounding
+/// prose or ```` ```json ```` fences), then reads each element's `index` (1-based) and
+/// `keep` flag. Returns a `Vec<bool>` of length `n` — a candidate whose index never
+/// appears, or appears without an affirmative `keep`, defaults to REJECT (the strict
+/// side: a missed snippet is fine, clutter is not). Returns `None` only when no JSON
+/// array is found at all, letting the caller distinguish a genuine "reject some"
+/// verdict from an unparseable reply and degrade accordingly.
+fn parse_review(raw: &str, n: usize) -> Option<Vec<bool>> {
+    let last = raw.rfind(']')?;
+    let items = raw
+        .match_indices('[')
+        .take(MAX_JSON_STARTS)
+        .filter(|&(a, _)| a <= last)
+        .find_map(
+            |(a, _)| match serde_json::from_str::<serde_json::Value>(&raw[a..=last]) {
+                Ok(serde_json::Value::Array(items)) => Some(items),
+                _ => None,
+            },
+        )?;
+    let mut verdicts = vec![false; n];
+    for it in items {
+        let Some(idx) = it.get("index").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        if idx >= 1 && (idx as usize) <= n {
+            verdicts[idx as usize - 1] = it.get("keep").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+    }
+    Some(verdicts)
 }
 
 /// Collapse a string to trimmed, single-spaced form so a whitespace-only difference
@@ -315,5 +411,38 @@ mod tests {
     #[test]
     fn normalize_key_collapses_whitespace_and_case() {
         assert_eq!(normalize_key("We  Ship\nWeekly"), normalize_key("we ship weekly"));
+    }
+
+    #[test]
+    fn review_verdicts_keep_and_reject_by_index() {
+        let raw = r#"[
+            {"index": 1, "keep": true, "reason": "new proof point"},
+            {"index": 2, "keep": false, "reason": "duplicate"},
+            {"index": 3, "keep": true, "reason": "reusable"}
+        ]"#;
+        assert_eq!(parse_review(raw, 3), Some(vec![true, false, true]));
+    }
+
+    #[test]
+    fn review_tolerates_prose_and_fences() {
+        let raw = "Sure:\n```json\n[{\"index\":1,\"keep\":true}]\n```\n";
+        assert_eq!(parse_review(raw, 1), Some(vec![true]));
+    }
+
+    #[test]
+    fn review_defaults_missing_index_or_keep_to_reject() {
+        // Candidate 2 never appears, and candidate 1 has no `keep` field — both reject.
+        assert_eq!(parse_review(r#"[{"index": 1}]"#, 2), Some(vec![false, false]));
+        // An out-of-range index is ignored, not a panic.
+        assert_eq!(parse_review(r#"[{"index": 5, "keep": true}]"#, 2), Some(vec![false, false]));
+        // An empty array is a valid "reject everything" verdict.
+        assert_eq!(parse_review("[]", 2), Some(vec![false, false]));
+    }
+
+    #[test]
+    fn review_returns_none_only_when_unparseable() {
+        // No JSON array at all → None, so the caller degrades to keeping candidates.
+        assert!(parse_review("no json here", 2).is_none());
+        assert!(parse_review("", 2).is_none());
     }
 }

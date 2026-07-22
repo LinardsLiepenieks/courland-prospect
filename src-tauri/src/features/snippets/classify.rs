@@ -91,8 +91,9 @@ async fn run(app: AppHandle, snippet_id: i64) {
     let Some((position, category)) = parse_classification(&raw) else {
         return; // unparseable model output — drop it
     };
-    // Snap to an existing category's spelling so "security" doesn't fork "Security".
-    let category = snap_to_existing(&category, &existing);
+    // Pin a canonical stage to its anchor + spelling; snap a freeform label to an
+    // existing spelling so "security" doesn't fork "Security".
+    let (position, category) = finalize_classification(position, &category, &existing);
 
     // Write under one lock, but only if the row is still classifiable AND still holds
     // the exact content we classified — otherwise a newer edit is in flight and its
@@ -132,6 +133,118 @@ async fn run(app: AppHandle, snippet_id: i64) {
     }
 }
 
+/// Re-score AND re-categorize every approved snippet in a scope — the user-initiated
+/// "reorganize my whole library" action. Unlike the per-edit [`run`] pass, this is a
+/// full reset: it classifies each snippet in turn and force-writes the result,
+/// deliberately overriding a hand-picked (`manual`) category and handing the row back
+/// to auto. It runs on the interactive CLI path ([`run_capped`], which queues rather
+/// than skipping) so it always completes, and emits `SNIPPETS_CHANGED` once when it
+/// finishes so any other open editor for the scope reconciles in a single reshuffle.
+/// Returns how many snippets it changed.
+///
+/// Snippets are processed openers-first and the stage-label set is accumulated as we
+/// go (starting empty), so the batch mints a fresh, self-consistent set of stages
+/// instead of snapping back to the scope's old (topic-style) categories.
+pub(crate) async fn reclassify_all(app: AppHandle, pitch_id: Option<i64>) -> Result<usize, String> {
+    let items: Vec<(i64, String)> = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            let st = app.state::<AppState>();
+            let conn = st.conn.lock().map_err(|e| e.to_string())?;
+            let mut approved =
+                repository::list_approved(&conn, pitch_id).map_err(|e| e.to_string())?;
+            approved.retain(|s| !s.content.trim().is_empty());
+            // Openers first, so the earliest items seed the labels later ones snap to.
+            approved.sort_by(|a, b| a.position.total_cmp(&b.position));
+            Ok::<_, String>(approved.into_iter().map(|s| (s.id, s.content)).collect())
+        })
+        .await
+        .map_err(|e| format!("snippets: reclassify gather task panicked: {e}"))??
+    };
+
+    let total = items.len();
+    let mut existing: Vec<String> = Vec::new();
+    let mut count = 0usize;
+    let mut gen_errors = 0usize;
+    let mut last_err = String::new();
+    for (id, content) in items {
+        let ctx = ClassifyContext { content: &content, existing_categories: &existing };
+        let raw = match ai::client::run_capped(Prompt::classify_snippet(&ctx)).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("snippets: reclassify generation failed: {e}");
+                gen_errors += 1;
+                last_err = e;
+                continue;
+            }
+        };
+        let Some((position, category)) = parse_classification(&raw) else {
+            continue;
+        };
+        let (position, category) = finalize_classification(position, &category, &existing);
+
+        // Force-write, but only if the row still exists and still holds the content we
+        // classified — a mid-batch edit's own pass will place the newer text.
+        // `None` = the row vanished or was edited mid-batch (contributes nothing);
+        // `Some(wrote)` = the row is present with this stage, `wrote` = an UPDATE ran.
+        let app2 = app.clone();
+        let classified = content.clone();
+        let cat = category.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let st = app2.state::<AppState>();
+            let conn = st.conn.lock().map_err(|e| e.to_string())?;
+            let Some(cur) = repository::find(&conn, id).map_err(|e| e.to_string())? else {
+                return Ok::<Option<bool>, String>(None);
+            };
+            if cur.status != APPROVED || cur.content.trim() != classified.trim() {
+                return Ok(None);
+            }
+            // Nothing to write if this row already holds this classification AND is
+            // already auto — skip the no-op UPDATE and its spurious `snippets://changed`
+            // reload (mirrors the per-edit `run` guard). A manual row with the same
+            // labels still needs writing: the force resets it to auto (`manual = 0`).
+            if cur.position == position && cur.category == cat && !cur.manual {
+                return Ok(Some(false));
+            }
+            let did = repository::force_classification(&conn, id, position, &cat)
+                .map_err(|e| e.to_string())?
+                .is_some();
+            Ok(Some(did))
+        })
+        .await
+        .map_err(|e| format!("snippets: reclassify write task panicked: {e}"))??;
+
+        // Accumulate this row's stage whenever the row is present (written OR an
+        // already-correct no-op), so later snippets snap to it and the batch converges
+        // on one label per stage even across an idempotent re-run.
+        if let Some(wrote) = outcome {
+            if !category.is_empty() && !existing.iter().any(|c| c == &category) {
+                existing.push(category.clone());
+            }
+            if wrote {
+                count += 1;
+            }
+        }
+    }
+    // If there were snippets to organize but the classifier failed on every single
+    // one (CLI down/erroring), that's an outright failure — surface it rather than
+    // returning a misleading `0 changed`, which the UI can't tell apart from "already
+    // organized". A partial failure (some classified, some errored) still succeeds.
+    if total > 0 && gen_errors == total {
+        return Err(format!("couldn't reach the classifier — no snippets were organized: {last_err}"));
+    }
+
+    // Emit once, after the whole batch — not per row. A per-row emit made an open editor
+    // reload and re-group repeatedly mid-batch, so cards visibly blinked out as they
+    // re-homed into (collapsed) sections one at a time. One terminal event lets any
+    // other open editor for this scope reconcile to the finished state in a single
+    // reshuffle; the window that launched the batch reloads via its own await.
+    if count > 0 {
+        let _ = app.emit(SNIPPETS_CHANGED, pitch_id);
+    }
+    Ok(count)
+}
+
 /// Parse Claude's reply into `(position, category)`. Tolerant, mirroring
 /// `parse_healed`: takes the outermost `{...}` object (so a reply wrapped in prose
 /// or ```` ```json ```` fences still parses). `position` is clamped to 0.0–1.0
@@ -164,16 +277,68 @@ fn parse_classification(raw: &str) -> Option<(f64, String)> {
     Some((position, category))
 }
 
-/// If `category` matches an existing one case-insensitively, return the existing
-/// spelling so the category set doesn't fork on capitalization/whitespace; else
-/// return `category` unchanged (a genuinely new label).
+/// The canonical conversation stages and their arc anchors, kept in lockstep with the
+/// stage list the model is given in `CLASSIFY_INSTRUCTION` (ai/prompt.rs). The prompt
+/// *asks* the model to use these exact labels and anchor positions; this table is where
+/// code *enforces* it (see [`finalize_classification`]), so punctuation drift can't fork
+/// a stage and a noisy `position` can't scramble the arc order the UI (and the draft
+/// composer) derive from it.
+const CANONICAL_STAGES: &[(&str, f64)] = &[
+    ("Opener", 0.08),
+    ("Warming up", 0.22),
+    ("Warm", 0.40),
+    ("Engaged", 0.58),
+    ("Objection", 0.72),
+    ("Calling to meet", 0.86),
+    ("Follow-up", 0.96),
+];
+
+/// Fold a label to a comparison key that ignores case, whitespace, and punctuation, so
+/// "Follow up", "follow-up", and "Follow-up" all collapse to the same stage.
+fn normalize_label(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// If `category` names one of the canonical stages (matched loosely — case, spacing,
+/// and punctuation ignored), return that stage's canonical spelling and arc anchor.
+fn canonical_stage(category: &str) -> Option<(&'static str, f64)> {
+    let key = normalize_label(category);
+    if key.is_empty() {
+        return None;
+    }
+    CANONICAL_STAGES
+        .iter()
+        .find(|(name, _)| normalize_label(name) == key)
+        .map(|&(name, anchor)| (name, anchor))
+}
+
+/// Normalize a parsed classification into what actually gets stored. A canonical stage
+/// is pinned to its anchor position and canonical spelling — this is what makes the
+/// result deterministic: the UI orders stage sections by `position` and the draft
+/// composer sorts snippets by it, and a re-run must be idempotent, none of which holds
+/// if `position` is left to model noise. A freeform (non-canonical) label keeps its
+/// clamped model position and is snapped to an existing spelling; empty stays empty.
+fn finalize_classification(position: f64, category: &str, existing: &[String]) -> (f64, String) {
+    if let Some((name, anchor)) = canonical_stage(category) {
+        return (anchor, name.to_string());
+    }
+    (position, snap_to_existing(category, existing))
+}
+
+/// If `category` matches an existing one loosely (case, whitespace, and punctuation
+/// ignored), return the existing spelling so the category set doesn't fork; else return
+/// `category` unchanged (a genuinely new label).
 fn snap_to_existing(category: &str, existing: &[String]) -> String {
     if category.is_empty() {
         return String::new();
     }
+    let key = normalize_label(category);
     existing
         .iter()
-        .find(|e| e.eq_ignore_ascii_case(category))
+        .find(|e| normalize_label(e) == key)
         .cloned()
         .unwrap_or_else(|| category.to_string())
 }
@@ -215,11 +380,45 @@ mod tests {
 
     #[test]
     fn snaps_category_to_existing_spelling() {
-        let existing = vec!["Security".to_string(), "Pricing".to_string()];
+        let existing = vec!["Security".to_string(), "Follow-up".to_string()];
         assert_eq!(snap_to_existing("security", &existing), "Security");
         assert_eq!(snap_to_existing("SECURITY", &existing), "Security");
+        // Punctuation/whitespace drift snaps to the existing spelling, not a fork.
+        assert_eq!(snap_to_existing("follow up", &existing), "Follow-up");
         // A genuinely new label is kept as-is.
         assert_eq!(snap_to_existing("Integrations", &existing), "Integrations");
         assert_eq!(snap_to_existing("", &existing), "");
+    }
+
+    #[test]
+    fn canonical_stage_matches_loosely_and_pins_anchor() {
+        assert_eq!(canonical_stage("Follow up"), Some(("Follow-up", 0.96)));
+        assert_eq!(canonical_stage("follow-up"), Some(("Follow-up", 0.96)));
+        assert_eq!(canonical_stage("  OPENER "), Some(("Opener", 0.08)));
+        assert_eq!(
+            canonical_stage("calling to meet"),
+            Some(("Calling to meet", 0.86))
+        );
+        // Freeform (non-canonical) and empty don't match.
+        assert_eq!(canonical_stage("Discovery"), None);
+        assert_eq!(canonical_stage(""), None);
+    }
+
+    #[test]
+    fn finalize_pins_canonical_stage_and_preserves_freeform() {
+        // A canonical stage is snapped to its anchor + spelling regardless of the
+        // position the model returned — so ordering is stable and re-runs idempotent.
+        assert_eq!(
+            finalize_classification(0.5, "follow up", &[]),
+            (0.96, "Follow-up".to_string())
+        );
+        // A freeform label keeps its position and snaps to an existing spelling.
+        let existing = vec!["Discovery".to_string()];
+        assert_eq!(
+            finalize_classification(0.33, "discovery", &existing),
+            (0.33, "Discovery".to_string())
+        );
+        // Empty stays empty, position untouched.
+        assert_eq!(finalize_classification(0.4, "", &[]), (0.4, String::new()));
     }
 }

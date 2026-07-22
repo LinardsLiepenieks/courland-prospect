@@ -152,6 +152,19 @@ pub fn copy_snippet(
     Ok(snippet)
 }
 
+/// Re-score AND re-categorize every approved snippet in a scope through the AI — the
+/// "reorganize my whole library" button. A full reset: it overrides hand-picked
+/// (`manual`) categories and hands each row back to auto-classification. Runs to
+/// completion on the interactive CLI path and emits `snippets://changed` ONCE when
+/// the whole batch finishes (not per snippet), so any other open editor for the
+/// scope reconciles in a single reshuffle; returns how many snippets it changed.
+/// `pitch_id` scopes it (a pitch id, or `None` for the profile) — mirrors
+/// `list_snippets`.
+#[tauri::command]
+pub async fn reclassify_snippets(app: AppHandle, pitch_id: Option<i64>) -> Result<usize, String> {
+    classify::reclassify_all(app, pitch_id).await
+}
+
 /// True when a rusqlite error is specifically a foreign-key constraint violation —
 /// the signal that a copy's target pitch no longer exists.
 fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {

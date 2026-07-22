@@ -51,6 +51,21 @@ pub(crate) fn list_approved(
     rows.collect()
 }
 
+/// Every approved, content-bearing snippet across ALL scopes (every pitch + the
+/// global profile), newest-first. The commenter uses these purely as a VOICE/STYLE
+/// corpus — samples of how the founder writes, never content to reuse — so it draws
+/// on the founder's whole body of writing rather than one pitch's library. Blank
+/// cards and unreviewed proposals are excluded, so the caller gets only usable prose.
+pub(crate) fn list_all_approved(conn: &Connection) -> rusqlite::Result<Vec<Snippet>> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM snippets WHERE status = '{APPROVED}' AND trim(content) != '' \
+         ORDER BY created_at DESC, id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], Snippet::from_row)?;
+    rows.collect()
+}
+
 /// The distinct non-empty category labels already in use for a scope — the set the
 /// classify pass shows the model so it reuses a fitting category instead of minting
 /// a near-duplicate. Scoped like `list`: a pitch sees its own categories, the
@@ -211,6 +226,28 @@ pub(crate) fn set_classification(
 ) -> rusqlite::Result<Option<Snippet>> {
     let changed = conn.execute(
         "UPDATE snippets SET position = ?1, category = ?2 WHERE id = ?3 AND manual = 0",
+        params![position, category, id],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    get(conn, id).map(Some)
+}
+
+/// Force-write an AI classification, overriding a manual pin and resetting the row
+/// to auto (`manual = 0`). Unlike `set_classification` (which the per-edit auto pass
+/// uses and which the `manual = 0` guard protects), this is the "re-score & re-organize
+/// everything" path: it deliberately overwrites a hand-picked category and hands the
+/// snippet back to auto-classification. Returns the updated row, or `None` when no row
+/// matched (deleted mid-batch).
+pub(crate) fn force_classification(
+    conn: &Connection,
+    id: i64,
+    position: f64,
+    category: &str,
+) -> rusqlite::Result<Option<Snippet>> {
+    let changed = conn.execute(
+        "UPDATE snippets SET position = ?1, category = ?2, manual = 0 WHERE id = ?3",
         params![position, category, id],
     )?;
     if changed == 0 {
@@ -463,6 +500,28 @@ mod tests {
         let after = get(&conn, s.id).unwrap();
         assert_eq!(after.category, "Cadence", "manual category survives the auto pass");
         assert_eq!(after.position, 0.8, "manual guard leaves position untouched too");
+    }
+
+    #[test]
+    fn force_classification_overrides_a_manual_pin_and_resets_to_auto() {
+        let conn = setup();
+        let s = create(&conn, None).unwrap();
+        update(&conn, s.id, "S", "book a call?").unwrap();
+        // User hand-pins a (topic-ish) category → manual.
+        set_category(&conn, s.id, "Scheduling").unwrap();
+        assert!(get(&conn, s.id).unwrap().manual);
+
+        // The batch re-score forces a new stage classification over the manual pin.
+        let out = force_classification(&conn, s.id, 0.9, "Close").unwrap().unwrap();
+        assert_eq!(out.position, 0.9);
+        assert_eq!(out.category, "Close");
+        assert!(!out.manual, "forced reclassify hands the row back to auto");
+
+        // A later normal auto pass can now touch it again (no longer pinned).
+        assert!(set_classification(&conn, s.id, 0.85, "Closing").unwrap().is_some());
+
+        // Missing row is a clean None.
+        assert!(force_classification(&conn, 999, 0.5, "X").unwrap().is_none());
     }
 
     #[test]
