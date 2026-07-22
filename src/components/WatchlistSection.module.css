@@ -1,0 +1,202 @@
+.watchlist {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Reserve height while the (near-instant) local query resolves, so the section
+   below doesn't jump when the list lands. */
+.loading {
+  min-height: 96px;
+}
+
+.empty {
+  margin: 2px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── Add form ────────────────────────────────────────────── */
+/* The URL takes the room; the label is a narrower companion; Add sits at the
+   end. Wraps to stacked inputs before the button on a narrow column. */
+.addForm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fields {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 8px;
+}
+
+/* The shared input primitive; sizing is the only local override. The URL is the
+   primary field (it grows); the label stays compact. */
+.urlInput {
+  composes: input from "../styles/form.module.css";
+  flex: 2;
+  min-width: 0;
+}
+
+.nameInput {
+  composes: input from "../styles/form.module.css";
+  flex: 1;
+  min-width: 0;
+}
+
+/* The shared primary button; it just shouldn't shrink in the flex row. */
+.addBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+  flex-shrink: 0;
+}
+
+/* ── List ────────────────────────────────────────────────── */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  animation: enterUp 240ms var(--ease-out) both;
+  transition:
+    border-color 150ms var(--ease-out),
+    opacity 150ms var(--ease-out);
+}
+
+.row:hover {
+  border-color: var(--border-strong);
+}
+
+/* Dim while its delete request is in flight. */
+.row[data-deleting="true"] {
+  opacity: 0.5;
+}
+
+.rowText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rowTitle {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowUrl {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowError {
+  margin-top: 2px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ── Open (quiet, text + icon) ───────────────────────────── */
+.openBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 550;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.openBtn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.openBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.openBtn:disabled {
+  opacity: 0.5;
+}
+
+/* ── Delete (icon-only, red on hover) ────────────────────── */
+.deleteBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.deleteBtn:hover:not(:disabled) {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.deleteBtn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.deleteBtn:disabled {
+  opacity: 0.5;
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    animation: none;
+    transition: border-color 150ms var(--ease-out);
+  }
+  .openBtn:active:not(:disabled),
+  .deleteBtn:active:not(:disabled) {
+    transform: none;
+  }
+}

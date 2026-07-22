@@ -1,0 +1,312 @@
+.comments {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* ── Page intro ──────────────────────────────────────────── */
+.intro {
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── Sections ────────────────────────────────────────────── */
+.section {
+  padding-top: 24px;
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.section:first-of-type {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
+}
+
+.sectionTitle {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.sectionSub {
+  margin-top: 4px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── Run control bar ─────────────────────────────────────── */
+.controlBar {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.countField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.countLabel {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.countSelect {
+  height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  font-size: 14px;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.countSelect:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.countSelect:disabled {
+  opacity: 0.6;
+}
+
+.checkField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  font-size: 14px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkField input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.scrapeBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+  margin-left: auto;
+  height: 38px;
+}
+
+.status {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+/* ── Draft inbox ─────────────────────────────────────────── */
+.draftsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.postBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+  flex-shrink: 0;
+}
+
+.loading {
+  min-height: 160px;
+}
+
+.empty {
+  margin: 2px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ── Draft card ──────────────────────────────────────────── */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  animation: enterUp 240ms var(--ease-out) both;
+  transition:
+    border-color 150ms var(--ease-out),
+    opacity 150ms var(--ease-out);
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+}
+
+.card[data-deleting="true"] {
+  opacity: 0.5;
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.author {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status pill — color-coded by lifecycle. */
+.badge {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+}
+
+.badge[data-status="queued"],
+.badge[data-status="posting"] {
+  color: var(--stage-amber);
+  background: color-mix(in srgb, var(--stage-amber) 14%, transparent);
+}
+
+.badge[data-status="posted"] {
+  color: var(--stage-green);
+  background: color-mix(in srgb, var(--stage-green) 14%, transparent);
+}
+
+.badge[data-status="failed"] {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* The source post — clamped to a few lines so a long post doesn't dominate. */
+.postText {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.comment {
+  composes: textarea from "../styles/form.module.css";
+  min-height: 0;
+}
+
+.failure {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Quiet text buttons, matching the watchlist row's affordances. */
+.openBtn,
+.deleteBtn {
+  padding: 6px 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 550;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.openBtn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.deleteBtn {
+  margin-left: auto;
+}
+
+.deleteBtn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.openBtn:active:not(:disabled),
+.deleteBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.openBtn:disabled,
+.deleteBtn:disabled {
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .comments,
+  .card {
+    animation: none;
+  }
+  .openBtn:active:not(:disabled),
+  .deleteBtn:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -5,19 +5,23 @@ import PitchDetail from "../pitches/PitchDetail";
 import EditPitchView from "../pitches/EditPitchView";
 import ProspectsView from "../prospects/ProspectsView";
 import ProfileView from "../profile/ProfileView";
+import CommentsView from "../comments/CommentsView";
 import styles from "./app.module.css";
 
-export type TabId = "pitch" | "prospects" | "settings" | "profile";
+export type TabId = "pitch" | "prospects" | "settings" | "comments" | "profile";
 
-// Pitch-scoped views sit on the left; Profile is global (not tied to a pitch),
-// so it's pushed to the far right of the nav to read as distinct.
+// Pitch-scoped views sit on the left; Comments + Profile are global (not tied to a
+// pitch), so they're pushed to the far right of the nav to read as distinct.
 const LEFT_TABS: TabItem<TabId>[] = [
   { id: "pitch", label: "Pitch" },
   { id: "prospects", label: "Prospects" },
   { id: "settings", label: "Settings" },
 ];
 
-const RIGHT_TABS: TabItem<TabId>[] = [{ id: "profile", label: "Profile" }];
+const RIGHT_TABS: TabItem<TabId>[] = [
+  { id: "comments", label: "Comments" },
+  { id: "profile", label: "Profile" },
+];
 
 interface Props {
   pitches: Pitch[];
@@ -66,6 +70,7 @@ export default function AppShell({
         {activeTab === "prospects" && (
           <ProspectsView pitch={activePitch} onCreateNew={onCreateNew} />
         )}
+        {activeTab === "comments" && <CommentsView />}
         {activeTab === "profile" && <ProfileView />}
         {activeTab === "settings" && (
           <EditPitchView
