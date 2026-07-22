@@ -53,20 +53,6 @@ pub(crate) fn exists(conn: &Connection, permalink: &str) -> rusqlite::Result<boo
     .map(|found| found.is_some())
 }
 
-/// Whether we've already posted a comment on this post (present in the durable
-/// `commented_posts` ledger). The post-claim path consults this so a draft that
-/// somehow re-reaches `queued` for a post we already commented on is never posted
-/// again — a defensive backstop behind the extension's own idempotency check.
-pub(crate) fn already_commented(conn: &Connection, permalink: &str) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT 1 FROM commented_posts WHERE permalink = ?1",
-        [permalink],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|found| found.is_some())
-}
-
 /// Insert a freshly-generated draft (status `draft`). Deduped on `permalink`:
 /// returns the new row, or `None` if a row for that permalink already existed
 /// (a concurrent scrape won the race) — the caller treats `None` as "already
@@ -354,7 +340,14 @@ mod tests {
         set_status(&conn, d.id, STATUS_POSTED, "").unwrap();
 
         // The permalink is now in the durable ledger…
-        assert!(already_commented(&conn, "https://li/p/1").unwrap());
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM commented_posts WHERE permalink = 'https://li/p/1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledgered, 1);
         // …so even after the draft row is deleted, the post still reads as handled
         // (a re-scrape won't re-surface it and comment a second time).
         assert_eq!(delete(&conn, d.id).unwrap(), 1);
