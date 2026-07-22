@@ -38,6 +38,19 @@ pub(crate) fn exists(conn: &Connection, linkedin_url: &str) -> rusqlite::Result<
     .map(|found| found.is_some())
 }
 
+/// The prospect with this `linkedin_url`, or `None` if the person isn't tracked.
+/// Lets the extension resolve, for the open thread, whether this person is already
+/// a prospect and which pitch they're on — so it can show "Prospect of <pitch>"
+/// instead of the add control, and draft each reply from that prospect's own pitch.
+pub(crate) fn find_by_url(
+    conn: &Connection,
+    linkedin_url: &str,
+) -> rusqlite::Result<Option<Prospect>> {
+    let sql = format!("SELECT {COLUMNS} FROM prospects WHERE linkedin_url = ?1");
+    conn.query_row(&sql, [linkedin_url], Prospect::from_row)
+        .optional()
+}
+
 /// The pitch a prospect is running, or `None` when the prospect has no pitch (or
 /// doesn't exist). Used by the snippet proposer to route a proposal to the right
 /// pitch's library — a prospect with no pitch has no library to propose into.
@@ -275,6 +288,23 @@ mod tests {
             set_stage(&conn, p.id, stages_a[1]).unwrap().unwrap().stage_id,
             Some(stages_a[1])
         );
+    }
+
+    #[test]
+    fn find_by_url_returns_prospect_with_pitch_or_none() {
+        let conn = setup();
+        let pitch = seed_pitch(&conn, "Design-in-code");
+        let url = "https://www.linkedin.com/in/ada/";
+        upsert(&conn, "Ada", url, "Analyst", Some(pitch), "").unwrap();
+
+        let found = find_by_url(&conn, url).unwrap().expect("prospect exists");
+        assert_eq!(found.name, "Ada");
+        assert_eq!(found.pitch_id, Some(pitch));
+
+        // An untracked person has no row.
+        assert!(find_by_url(&conn, "https://www.linkedin.com/in/nobody/")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

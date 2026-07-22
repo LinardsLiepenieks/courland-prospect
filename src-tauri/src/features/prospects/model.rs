@@ -11,7 +11,8 @@ pub struct Prospect {
     pub linkedin_url: String,
     /// Their headline/title as scraped, if any.
     pub headline: String,
-    /// The pitch being run on them. `None` if the pitch was later deleted.
+    /// The pitch being run on them. `None` if they were added without a pitch;
+    /// deleting a pitch deletes its prospects, so a delete never strands a null here.
     pub pitch_id: Option<i64>,
     /// The pipeline stage they're currently in. `None` if unassigned (no pitch,
     /// or the stage was deleted out from under them via the SET NULL safety net).

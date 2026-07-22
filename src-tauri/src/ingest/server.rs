@@ -1,11 +1,24 @@
 //! The loopback HTTP server the Chrome extension talks to. Runs on Tauri's
-//! existing tokio runtime (no second runtime). Three routes, all behind a
-//! layered guard:
+//! existing tokio runtime (no second runtime). All routes sit behind a layered
+//! guard. Capture + drafting:
 //!
 //!   GET  /health    — extension check-in / liveness
 //!   GET  /pitches   — feeds the dropdown (reuses the pitches repository)
+//!   GET  /prospect  — is this person a prospect, and on which pitch (by URL)
 //!   POST /prospects — captures a prospect (upsert; reuses the prospects repo)
 //!   POST /messages  — records captured messages, both directions (messages repo)
+//!   POST /draft     — drafts one reply for an open thread
+//!   GET/POST /selectors, /heal-selectors — self-healing LinkedIn selectors
+//!
+//! The commenter (the extension is a headless worker polling these; the app is
+//! the cockpit — see `crate::features::comments`):
+//!
+//!   GET  /watched-profiles        — the watchlist to visit before the feed
+//!   POST /comment-run/claim       — claim a requested scrape (idle→scraping)
+//!   POST /comment-run/status      — report run progress (scraping / idle)
+//!   POST /comment-drafts          — draft + persist a comment for one post
+//!   POST /comment-drafts/claim    — claim queued drafts to post (queued→posting)
+//!   POST /comment-draft-status    — report a post outcome (posted / failed)
 //!
 //! Defenses (see `super::security`): bound to 127.0.0.1, exact `Host` check
 //! (anti DNS-rebinding), a shared token header, and a CORS allowlist pinned to
@@ -15,7 +28,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{header, HeaderName, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -27,9 +40,12 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use super::security::{self, TOKEN_HEADER};
 use super::{gate, Heartbeat, IngestConfig};
-use crate::ai::{self, BrokenSelector, DraftContext, DraftMessage, Prompt};
+use crate::ai::{
+    self, comment_is_skip, BrokenSelector, CommentContext, DraftContext, DraftMessage,
+    DraftSnippet, Prompt,
+};
 use crate::database::AppState;
-use crate::features::{messages, pitches, profile, prospects, selectors, snippets};
+use crate::features::{comments, messages, pitches, profile, prospects, selectors, snippets, watchlist};
 use crate::util::{MAX_NAME_LEN, MAX_TEXT_LEN};
 
 /// Ceiling on a single ingest request body. The largest legitimate payload is a
@@ -83,9 +99,16 @@ pub async fn serve(app: AppHandle, config: IngestConfig) {
     let router = Router::new()
         .route("/health", get(health))
         .route("/pitches", get(list_pitches))
+        .route("/prospect", get(lookup_prospect))
         .route("/prospects", post(create_prospect))
         .route("/messages", post(create_messages))
         .route("/draft", post(draft_reply))
+        .route("/watched-profiles", get(list_watched_profiles))
+        .route("/comment-run/claim", post(claim_comment_run))
+        .route("/comment-run/status", post(set_comment_run_status))
+        .route("/comment-drafts", post(create_comment_draft))
+        .route("/comment-drafts/claim", post(claim_comment_drafts))
+        .route("/comment-draft-status", post(record_comment_status))
         .route("/selectors", get(get_selectors))
         .route("/heal-selectors", post(heal_selectors))
         // Guard is inner (runs after CORS), so CORS preflight is answered without
@@ -156,6 +179,51 @@ async fn list_pitches(State(state): State<ServerState>) -> Response {
 
     match result {
         Ok(Ok(list)) => Json(list).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Query for `GET /prospect` — the canonical LinkedIn URL of the open thread's
+/// person (the extension's `normalizeProfileUrl` is the sole producer, matching
+/// how capture resolves prospects).
+#[derive(Deserialize)]
+struct ProspectQuery {
+    // `default` so a missing `url` hits the domain-specific "url is required" 400
+    // below rather than a generic extractor-level 400 with no message.
+    #[serde(default)]
+    url: String,
+}
+
+/// Look up whether the open thread's person is already a prospect, and on which
+/// pitch. Returns `{ "exists": bool, "pitch_id": number | null }` — the extension
+/// uses it to show "Prospect of <pitch>" instead of the add control, and to draft
+/// each reply from that prospect's own pitch. `pitch_id` is null when the prospect
+/// was added without a pitch — deleting a pitch removes its prospects, so a delete
+/// never strands a null-pitch row here. Reads only.
+async fn lookup_prospect(
+    State(state): State<ServerState>,
+    Query(q): Query<ProspectQuery>,
+) -> Response {
+    let url = q.url.trim().to_string();
+    if url.is_empty() {
+        return (StatusCode::BAD_REQUEST, "url is required").into_response();
+    }
+
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        prospects::repository::find_by_url(&conn, &url).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(found)) => Json(serde_json::json!({
+            "exists": found.is_some(),
+            "pitch_id": found.and_then(|p| p.pitch_id),
+        }))
+        .into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -302,11 +370,12 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
     };
 
     // Only content-bearing snippets are worth sending; drop the blank cards the
-    // editor leaves behind.
-    let snippet_pairs: Vec<(String, String)> = snippets
+    // editor leaves behind. Each carries its conversation stage (`category`) so the
+    // composer can prefer stage-appropriate lines for where the thread sits.
+    let draft_snippets: Vec<DraftSnippet> = snippets
         .into_iter()
         .filter(|s| !s.content.trim().is_empty())
-        .map(|s| (s.name, s.content))
+        .map(|s| DraftSnippet { stage: s.category, name: s.name, content: s.content })
         .collect();
 
     // Nothing to compose from → don't burn a CLI call. Return the same shape of
@@ -314,7 +383,7 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
     let has_material = !pitch.skill.trim().is_empty()
         || !profile.who_are_you.trim().is_empty()
         || !profile.what_building.trim().is_empty()
-        || !snippet_pairs.is_empty();
+        || !draft_snippets.is_empty();
     if !has_material {
         return Json(serde_json::json!({
             "draft": "NO SNIPPETS OR PROFILE CONFIGURED YET — ADD MATERIAL IN COURLAND TO DRAFT A REPLY."
@@ -338,13 +407,337 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         pitch_skill: &pitch.skill,
         profile_who: &profile.who_are_you,
         profile_building: &profile.what_building,
-        snippets: &snippet_pairs,
+        snippets: &draft_snippets,
         conversation: &conversation,
     };
 
     match ai::client::run_capped(Prompt::draft_reply(&ctx)).await {
         Ok(draft) => Json(serde_json::json!({ "draft": draft })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Serve the hand-curated watchlist — the LinkedIn profiles a comment run visits
+/// (before the feed) to check for new posts. The extension fetches this at the
+/// start of a run. Reads only.
+async fn list_watched_profiles(State(state): State<ServerState>) -> Response {
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        watchlist::repository::list(&conn).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(list)) => Json(list).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Claim a requested scrape. If the app has queued a run (`status = requested`),
+/// atomically flip it to `scraping` and return its budget + watchlist choice;
+/// otherwise `{ "run": null }`. The extension polls this and, on a non-null run,
+/// does the scraping. The flip is the claim, so two polling workers can't both
+/// start the same run.
+async fn claim_comment_run(State(state): State<ServerState>) -> Response {
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::take_requested(&conn).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(run))) => {
+            let _ = state.app.emit(comments::COMMENTS_CHANGED, ());
+            Json(serde_json::json!({
+                "run": { "count": run.count, "include_watchlist": run.include_watchlist }
+            }))
+            .into_response()
+        }
+        Ok(Ok(None)) => Json(serde_json::json!({ "run": null })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body for `POST /comment-run/status` — the extension reporting run progress.
+#[derive(Deserialize)]
+struct RunStatusIn {
+    #[serde(default)]
+    status: String,
+}
+
+/// Report the extension finished a scrape (`status: "idle"`). The claim already put
+/// the run into `scraping`, so `idle` is the only status the extension ever reports
+/// here — and it's applied CONDITIONALLY (only from `scraping`, see `finish_scrape`)
+/// so it can't clobber a re-request that arrived mid-run. Any other value is
+/// rejected so a bad body can't wedge the run.
+async fn set_comment_run_status(
+    State(state): State<ServerState>,
+    Json(body): Json<RunStatusIn>,
+) -> Response {
+    if body.status.trim() != "idle" {
+        return (StatusCode::BAD_REQUEST, "status must be idle").into_response();
+    }
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::finish_scrape(&conn).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            let _ = state.app.emit(comments::COMMENTS_CHANGED, ());
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// How many snippets to feed the commenter as voice samples. A handful of varied
+/// examples conveys the founder's style; more only adds tokens and tempts the model
+/// to lift wording, which the style-only rule forbids (a comment must never reuse a
+/// snippet's content).
+const COMMENT_VOICE_CAP: usize = 12;
+
+/// Reduce the founder's approved snippet contents to a bounded voice/style corpus
+/// for the commenter: drop exact-duplicate lines (a snippet copied across the
+/// pitch/profile boundary — case/space-insensitive, keeping the first), then, if
+/// still over the cap, take an evenly-spaced stride across the set so the sample
+/// spreads over the whole library instead of clustering on the newest additions.
+fn sample_voice(contents: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let kept: Vec<String> = contents
+        .into_iter()
+        .filter(|c| seen.insert(c.trim().to_lowercase()))
+        .collect();
+    if kept.len() <= COMMENT_VOICE_CAP {
+        return kept;
+    }
+    let n = kept.len();
+    (0..COMMENT_VOICE_CAP)
+        .map(|i| kept[i * n / COMMENT_VOICE_CAP].clone())
+        .collect()
+}
+
+/// Body the extension POSTs per scraped post to draft + persist a comment.
+#[derive(Deserialize)]
+struct CommentDraftIn {
+    #[serde(default)]
+    permalink: String,
+    #[serde(default)]
+    author_name: String,
+    #[serde(default)]
+    post_text: String,
+}
+
+/// Draft a comment for one scraped post and persist it to the inbox. Dedup +
+/// budget are driven by the response the extension counts against the run's
+/// `count`:
+///  - `exists`  — already in the inbox (any status); no CLI call, no insert.
+///  - `skipped` — the model judged the post not worth engaging; no insert, so a
+///                later scrape can resurface it once the post has evolved.
+///  - `created` — a new draft row (returned). The extension counts these toward
+///                the placed-draft budget.
+/// The comment composes from the global profile (persona) and the founder's
+/// snippets used purely as a voice/style corpus (never their content, no pitch), so
+/// it reads as a peer who sounds like the founder, not pitch copy.
+async fn create_comment_draft(
+    State(state): State<ServerState>,
+    Json(body): Json<CommentDraftIn>,
+) -> Response {
+    let permalink = body.permalink.trim().to_string();
+    if permalink.is_empty() {
+        return (StatusCode::BAD_REQUEST, "permalink is required").into_response();
+    }
+    if permalink.chars().count() > MAX_TEXT_LEN
+        || body.author_name.chars().count() > MAX_NAME_LEN
+        || body.post_text.chars().count() > MAX_TEXT_LEN
+    {
+        return (StatusCode::BAD_REQUEST, "field too long").into_response();
+    }
+
+    // Already handled → skip without burning a CLI call.
+    let app = state.app.clone();
+    let plink = permalink.clone();
+    let known = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::exists(&conn, &plink).map_err(|e| e.to_string())
+    })
+    .await;
+    match known {
+        Ok(Ok(true)) => return Json(serde_json::json!({ "result": "exists" })).into_response(),
+        Ok(Ok(false)) => {}
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    // An empty post has nothing to react to — treat as a skip (no CLI).
+    if body.post_text.trim().is_empty() {
+        return Json(serde_json::json!({ "result": "skipped" })).into_response();
+    }
+
+    // Gather the profile persona plus the founder's approved snippets. The profile
+    // is the persona to write FROM; the snippets are a VOICE/STYLE corpus only — the
+    // model mimics how they're written, never reuses their content (no pitch leaks in).
+    let app = state.app.clone();
+    let gathered = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        let profile = profile::repository::get(&conn).map_err(|e| e.to_string())?;
+        let snippets = snippets::repository::list_all_approved(&conn).map_err(|e| e.to_string())?;
+        Ok::<_, String>((profile, snippets))
+    })
+    .await;
+    let (profile, snippets) = match gathered {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let voice_samples = sample_voice(snippets.into_iter().map(|s| s.content).collect());
+
+    let ctx = CommentContext {
+        author_name: body.author_name.trim(),
+        post_text: body.post_text.trim(),
+        profile_who: &profile.who_are_you,
+        profile_building: &profile.what_building,
+        voice_samples: &voice_samples,
+    };
+    let comment = match ai::client::run_capped(Prompt::draft_comment(&ctx)).await {
+        Ok(out) if comment_is_skip(&out) => {
+            return Json(serde_json::json!({ "result": "skipped" })).into_response()
+        }
+        Ok(out) => out,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+
+    // Persist the draft. A lost insert race (a concurrent scrape beat us to this
+    // permalink) comes back None → report `exists`, same as the pre-check.
+    let author = body.author_name.trim().to_string();
+    let post_text = body.post_text.trim().to_string();
+    let app = state.app.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::insert_generated(&conn, &permalink, &author, &post_text, &comment)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+
+    match stored {
+        Ok(Ok(Some(draft))) => {
+            let _ = state.app.emit(comments::COMMENTS_CHANGED, ());
+            Json(serde_json::json!({
+                "result": "created",
+                "draft": serde_json::to_value(&draft).unwrap_or(serde_json::Value::Null),
+            }))
+            .into_response()
+        }
+        Ok(Ok(None)) => Json(serde_json::json!({ "result": "exists" })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body for `POST /comment-drafts/claim`.
+#[derive(Deserialize)]
+struct ClaimIn {
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// Cap on how many queued drafts one claim hands out — small so posting drains in
+/// paced batches across polls (an evicted service worker resumes on the next
+/// alarm) rather than one long run that could be killed mid-way.
+const MAX_CLAIM: u32 = 5;
+
+/// Claim a batch of queued drafts to post: flips them `queued` → `posting` and
+/// returns the id + permalink + comment for each. The extension opens each post,
+/// submits, then reports the outcome to `/comment-draft-status`.
+async fn claim_comment_drafts(
+    State(state): State<ServerState>,
+    Json(body): Json<ClaimIn>,
+) -> Response {
+    let limit = body.limit.unwrap_or(MAX_CLAIM).clamp(1, MAX_CLAIM);
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::claim_queued(&conn, limit).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(drafts)) => {
+            if !drafts.is_empty() {
+                let _ = state.app.emit(comments::COMMENTS_CHANGED, ());
+            }
+            let out: Vec<_> = drafts
+                .iter()
+                .map(|d| {
+                    serde_json::json!({ "id": d.id, "permalink": d.permalink, "comment": d.comment })
+                })
+                .collect();
+            Json(serde_json::json!({ "drafts": out })).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body for `POST /comment-draft-status` — the extension reporting a post outcome.
+#[derive(Deserialize)]
+struct DraftStatusIn {
+    // `default` (0) so a missing `id` hits the explicit "id is required" 400 below
+    // rather than a generic extractor 400 — and 0 never silently matches a real row.
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    error: String,
+}
+
+/// Record the outcome of posting one claimed draft: `posted` (done) or `failed`
+/// (retryable — the next "Post all" re-queues it). Any other status is rejected.
+async fn record_comment_status(
+    State(state): State<ServerState>,
+    Json(body): Json<DraftStatusIn>,
+) -> Response {
+    if body.id <= 0 {
+        return (StatusCode::BAD_REQUEST, "id is required").into_response();
+    }
+    let status = body.status.trim().to_string();
+    if status != comments::repository::STATUS_POSTED
+        && status != comments::repository::STATUS_FAILED
+    {
+        return (StatusCode::BAD_REQUEST, "status must be posted or failed").into_response();
+    }
+    let error: String = body.error.trim().chars().take(MAX_TEXT_LEN).collect();
+    let id = body.id;
+    let app = state.app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let st = app.state::<AppState>();
+        let conn = st.conn.lock().map_err(|e| e.to_string())?;
+        comments::repository::set_status(&conn, id, &status, &error).map_err(|e| e.to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            let _ = state.app.emit(comments::COMMENTS_CHANGED, ());
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

@@ -4,6 +4,7 @@
 //! `lib.rs`. Shared infrastructure (connection, migrations) lives in
 //! `crate::database`, not here.
 
+pub mod comments;
 pub mod messages;
 pub mod pitches;
 pub mod profile;
@@ -11,3 +12,4 @@ pub mod prospects;
 pub mod selectors;
 pub mod snippets;
 pub mod stages;
+pub mod watchlist;
