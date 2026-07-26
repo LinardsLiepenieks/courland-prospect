@@ -4,8 +4,7 @@
 use rand::distr::Alphanumeric;
 use rand::Rng;
 
-/// A random `n`-char alphanumeric string. Used for the ingest shared token and
-/// for capture-profile sandbox slugs.
+/// A random `n`-char alphanumeric string. Used for the ingest shared token.
 pub fn random_alphanumeric(n: usize) -> String {
     rand::rng()
         .sample_iter(Alphanumeric)
@@ -14,12 +13,13 @@ pub fn random_alphanumeric(n: usize) -> String {
         .collect()
 }
 
-/// Upper bound (in characters) on a short single-line field — pitch/stage/
+/// Upper bound (in characters) on a short single-line field — customer/stage/
 /// snippet names, a prospect's name/headline.
 pub const MAX_NAME_LEN: usize = 200;
 
-/// Upper bound (in characters) on a long free-text field — skill/profile copy,
-/// snippet content, notes, message bodies. Generous: real content never nears
+/// Upper bound (in characters) on a long free-text field — the product
+/// description, a customer profile's steering text, profile copy, snippet
+/// content, notes, message bodies. Generous: real content never nears
 /// it. Guards against a pathological paste bloating the DB or (for AI-bound
 /// fields) ballooning a CLI argument.
 pub const MAX_TEXT_LEN: usize = 20_000;

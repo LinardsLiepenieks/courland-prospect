@@ -2,24 +2,22 @@
 //! the caller (command layer or the ingest HTTP server) owns connection locking.
 //! Kept free of Tauri types so it stays unit-testable against an in-memory DB.
 //!
-//! `list`/`upsert` are `pub(crate)` (not `pub(super)`) because the loopback
-//! ingest server in `crate::ingest` calls them directly, from outside `features`.
+//! `list`/`upsert`/`find_by_url` are `pub(crate)` (not `pub(super)`) because the
+//! loopback ingest server in `crate::ingest` calls them directly, from outside
+//! `features`.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::model::Prospect;
 
-const COLUMNS: &str =
-    "id, name, linkedin_url, headline, pitch_id, stage_id, messages_sent, awaiting_reply, note, created_at";
+const COLUMNS: &str = "id, name, linkedin_url, headline, customer_id, stage_id, \
+     messages_sent, awaiting_reply, note, created_at";
 
-/// Subquery yielding a pitch's messaging (first) stage id, or NULL if the pitch
-/// has no stages / is NULL. `?N` is the pitch_id bind position at the call site.
-fn messaging_stage_sql(pitch_bind: &str) -> String {
-    format!(
-        "(SELECT id FROM stages WHERE pitch_id = {pitch_bind} AND kind = 'messaging' \
-         ORDER BY position, id LIMIT 1)"
-    )
-}
+/// Subquery yielding the pipeline's messaging (first) stage id. There is one
+/// pipeline now, so this takes no owner — a freshly captured prospect always has
+/// the same place to land.
+const MESSAGING_STAGE: &str =
+    "(SELECT id FROM stages WHERE kind = 'messaging' ORDER BY position, id LIMIT 1)";
 
 fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Prospect>> {
     let sql = format!("SELECT {COLUMNS} FROM prospects WHERE id = ?1");
@@ -39,9 +37,10 @@ pub(crate) fn exists(conn: &Connection, linkedin_url: &str) -> rusqlite::Result<
 }
 
 /// The prospect with this `linkedin_url`, or `None` if the person isn't tracked.
-/// Lets the extension resolve, for the open thread, whether this person is already
-/// a prospect and which pitch they're on — so it can show "Prospect of <pitch>"
-/// instead of the add control, and draft each reply from that prospect's own pitch.
+/// Lets the extension resolve, for the open thread, whether this person is
+/// already a prospect and which customer profile they match — so it can show
+/// "Prospect · <customer>" instead of the add control, and draft each reply
+/// steered toward that profile's goal.
 pub(crate) fn find_by_url(
     conn: &Connection,
     linkedin_url: &str,
@@ -49,19 +48,6 @@ pub(crate) fn find_by_url(
     let sql = format!("SELECT {COLUMNS} FROM prospects WHERE linkedin_url = ?1");
     conn.query_row(&sql, [linkedin_url], Prospect::from_row)
         .optional()
-}
-
-/// The pitch a prospect is running, or `None` when the prospect has no pitch (or
-/// doesn't exist). Used by the snippet proposer to route a proposal to the right
-/// pitch's library — a prospect with no pitch has no library to propose into.
-pub(crate) fn pitch_id(conn: &Connection, prospect_id: i64) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT pitch_id FROM prospects WHERE id = ?1",
-        [prospect_id],
-        |r| r.get::<_, Option<i64>>(0),
-    )
-    .optional()
-    .map(Option::flatten)
 }
 
 pub(crate) fn list(conn: &Connection) -> rusqlite::Result<Vec<Prospect>> {
@@ -72,48 +58,51 @@ pub(crate) fn list(conn: &Connection) -> rusqlite::Result<Vec<Prospect>> {
 }
 
 /// Insert a prospect, or if one with the same `linkedin_url` already exists,
-/// refresh its `pitch_id` and `headline`. Never errors on duplicate — this is
+/// refresh its `customer_id` and `headline`. Never errors on duplicate — this is
 /// the low-friction "add to prospects" path. `created_at`, `name`, and `note`
 /// are preserved on the existing row.
 ///
-/// A fresh insert lands in the pitch's messaging stage. On a dedup update the
-/// stage is preserved when the pitch is unchanged (don't yank someone back to
-/// the top of their funnel on re-capture); when the pitch actually changes, the
-/// prospect moves to the new pitch's messaging stage. `messages_sent` is never
-/// touched here — it's derived from captured `messages` (see `features::messages`)
-/// and persists across a pitch change, so it always reflects real outreach.
+/// A re-capture can SET or CHANGE the customer profile but never CLEARS it: a
+/// `None` leaves whatever the row already had. Unassigned is the extension's
+/// default pick, so without this an accidental re-add — or one made while the
+/// picker hadn't loaded — would wipe a tag the user set deliberately, and the
+/// widget switches to its read-only pill afterwards, so it couldn't be repaired
+/// from LinkedIn. Clearing a profile is an app-side action (the prospect row's
+/// customer menu), where it's explicit and reversible.
+///
+/// A fresh insert lands in the messaging stage. A re-capture NEVER moves anyone:
+/// with one shared pipeline, re-tagging someone's customer profile says nothing
+/// about how far along the conversation is, so their stage is left exactly where
+/// it was. (Under the old per-pitch pipelines a pitch change had to relocate them,
+/// because the stage they sat in belonged to a different funnel.) `messages_sent`
+/// is never touched here either — it's derived from captured `messages` (see
+/// `features::messages`).
 pub(crate) fn upsert(
     conn: &Connection,
     name: &str,
     linkedin_url: &str,
     headline: &str,
-    pitch_id: Option<i64>,
+    customer_id: Option<i64>,
     note: &str,
 ) -> rusqlite::Result<Prospect> {
-    let insert_stage = messaging_stage_sql("?4");
-    let update_stage = messaging_stage_sql("excluded.pitch_id");
     let sql = format!(
-        "INSERT INTO prospects (name, linkedin_url, headline, pitch_id, note, stage_id)
-              VALUES (?1, ?2, ?3, ?4, ?5, {insert_stage})
+        "INSERT INTO prospects (name, linkedin_url, headline, customer_id, note, stage_id)
+              VALUES (?1, ?2, ?3, ?4, ?5, {MESSAGING_STAGE})
          ON CONFLICT(linkedin_url) DO UPDATE SET
-              pitch_id = excluded.pitch_id,
-              headline = excluded.headline,
-              stage_id = CASE
-                  WHEN prospects.pitch_id IS excluded.pitch_id THEN prospects.stage_id
-                  ELSE {update_stage}
-              END
+              customer_id = COALESCE(excluded.customer_id, prospects.customer_id),
+              headline    = excluded.headline
          RETURNING {COLUMNS}"
     );
     conn.query_row(
         &sql,
-        params![name, linkedin_url, headline, pitch_id, note],
+        params![name, linkedin_url, headline, customer_id, note],
         Prospect::from_row,
     )
 }
 
-/// Move a prospect to `stage_id`. The stage must belong to the prospect's own
-/// pitch (enforced in SQL) — otherwise no row changes and this returns `None`,
-/// which the command surfaces as an error. Returns the updated prospect.
+/// Move a prospect to `stage_id`. The stage must exist (enforced in SQL) —
+/// otherwise no row changes and this returns `None`, which the command surfaces
+/// as an error. With one shared pipeline there's no per-owner check left to make.
 pub(super) fn set_stage(
     conn: &Connection,
     id: i64,
@@ -121,12 +110,28 @@ pub(super) fn set_stage(
 ) -> rusqlite::Result<Option<Prospect>> {
     let changed = conn.execute(
         "UPDATE prospects SET stage_id = ?1
-         WHERE id = ?2
-           AND EXISTS (
-               SELECT 1 FROM stages
-               WHERE stages.id = ?1 AND stages.pitch_id = prospects.pitch_id
-           )",
+         WHERE id = ?2 AND EXISTS (SELECT 1 FROM stages WHERE stages.id = ?1)",
         params![stage_id, id],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    get(conn, id)
+}
+
+/// Re-tag which customer profile a prospect matches, or clear it (`None`).
+/// Re-tagging is deliberately cheap and reversible: it changes only how their
+/// drafts are steered, never their place on the board. Returns `None` when the
+/// prospect doesn't exist; a `customer_id` that doesn't exist trips the foreign
+/// key, which the command maps to a plain message.
+pub(super) fn set_customer(
+    conn: &Connection,
+    id: i64,
+    customer_id: Option<i64>,
+) -> rusqlite::Result<Option<Prospect>> {
+    let changed = conn.execute(
+        "UPDATE prospects SET customer_id = ?1 WHERE id = ?2",
+        params![customer_id, id],
     )?;
     if changed == 0 {
         return Ok(None);
@@ -145,6 +150,7 @@ pub(super) fn delete(conn: &Connection, id: i64) -> rusqlite::Result<usize> {
 mod tests {
     use super::*;
     use crate::database::migrations;
+    use crate::features::stages::repository as stages_repo;
 
     fn setup() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -153,63 +159,55 @@ mod tests {
         conn
     }
 
-    fn seed_pitch(conn: &Connection, name: &str) -> i64 {
-        conn.execute("INSERT INTO pitches (name, skill) VALUES (?1, '')", [name])
+    fn seed_customer(conn: &Connection, name: &str) -> i64 {
+        conn.execute("INSERT INTO customers (name) VALUES (?1)", [name])
             .unwrap();
         conn.last_insert_rowid()
     }
 
-    /// Seed a pitch together with a full-cycle pipeline, returning the pitch id
-    /// and its ordered stage ids.
-    fn seed_pitch_with_stages(conn: &Connection, name: &str) -> (i64, Vec<i64>) {
-        let pitch = seed_pitch(conn, name);
-        let stages = crate::features::stages::repository::create_many(
-            conn,
-            pitch,
-            &crate::features::stages::repository::full_cycle_template(),
-        )
-        .unwrap();
-        (pitch, stages.into_iter().map(|s| s.id).collect())
+    /// The one shared pipeline's stage ids, in funnel order.
+    fn stage_ids(conn: &Connection) -> Vec<i64> {
+        stages_repo::list(conn).unwrap().into_iter().map(|s| s.id).collect()
     }
 
     #[test]
     fn upsert_inserts_then_lists() {
         let conn = setup();
-        let pitch = seed_pitch(&conn, "Design-in-code");
+        let customer = seed_customer(&conn, "Solo agencies");
         let p = upsert(
             &conn,
             "Ada Lovelace",
             "https://www.linkedin.com/in/ada/",
             "Analyst",
-            Some(pitch),
+            Some(customer),
             "",
         )
         .unwrap();
         assert!(p.id > 0);
         assert_eq!(p.name, "Ada Lovelace");
         assert_eq!(p.linkedin_url, "https://www.linkedin.com/in/ada/");
-        assert_eq!(p.pitch_id, Some(pitch));
+        assert_eq!(p.customer_id, Some(customer));
         assert!(!p.created_at.is_empty());
 
         assert_eq!(list(&conn).unwrap().len(), 1);
     }
 
     #[test]
-    fn upsert_dedups_on_url_and_updates_pitch() {
+    fn upsert_dedups_on_url_and_updates_customer() {
         let conn = setup();
-        let pitch_a = seed_pitch(&conn, "A");
-        let pitch_b = seed_pitch(&conn, "B");
+        let a = seed_customer(&conn, "A");
+        let b = seed_customer(&conn, "B");
         let url = "https://www.linkedin.com/in/grace/";
 
-        let first = upsert(&conn, "Grace", url, "Rear Admiral", Some(pitch_a), "note").unwrap();
-        // Re-add the same person with a different pitch + refreshed headline.
-        let second = upsert(&conn, "Grace H.", url, "Computer Scientist", Some(pitch_b), "").unwrap();
+        let first = upsert(&conn, "Grace", url, "Rear Admiral", Some(a), "note").unwrap();
+        // Re-add the same person under a different profile + refreshed headline.
+        let second = upsert(&conn, "Grace H.", url, "Computer Scientist", Some(b), "").unwrap();
 
         // Same row (dedup), not a duplicate.
         assert_eq!(first.id, second.id);
         assert_eq!(list(&conn).unwrap().len(), 1);
-        // pitch_id + headline were updated...
-        assert_eq!(second.pitch_id, Some(pitch_b));
+        // customer_id + headline were updated...
+        assert_eq!(second.customer_id, Some(b));
         assert_eq!(second.headline, "Computer Scientist");
         // ...while name, note, and created_at were preserved.
         assert_eq!(second.name, "Grace");
@@ -217,19 +215,37 @@ mod tests {
         assert_eq!(second.created_at, first.created_at);
     }
 
+    /// The extension's picker defaults to "no profile" and can be re-added by
+    /// accident (or with an unloaded list), so a `None` must never clear a tag the
+    /// user set. Only the app can unassign someone.
     #[test]
-    fn upsert_allows_null_pitch() {
+    fn recapture_without_a_customer_keeps_the_existing_one() {
         let conn = setup();
-        let p = upsert(&conn, "No Pitch", "https://www.linkedin.com/in/x/", "", None, "").unwrap();
-        assert_eq!(p.pitch_id, None);
+        let a = seed_customer(&conn, "Solo agencies");
+        let url = "https://www.linkedin.com/in/ada/";
+
+        upsert(&conn, "Ada", url, "Analyst", Some(a), "").unwrap();
+        let again = upsert(&conn, "Ada", url, "Head of Analysis", None, "").unwrap();
+
+        assert_eq!(again.customer_id, Some(a), "an unassigned re-add wiped the tag");
+        // The headline still refreshes — only the profile is protected.
+        assert_eq!(again.headline, "Head of Analysis");
     }
 
     #[test]
-    fn upsert_lands_new_prospect_in_messaging_stage() {
+    fn upsert_allows_no_customer() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn, "P");
-        let p = upsert(&conn, "Ada", "https://li/ada", "", Some(pitch), "").unwrap();
-        assert_eq!(p.stage_id, Some(stages[0])); // Messaged
+        let p = upsert(&conn, "Unassigned", "https://www.linkedin.com/in/x/", "", None, "").unwrap();
+        assert_eq!(p.customer_id, None);
+        // Still in the pipeline — that's the point of one shared funnel.
+        assert_eq!(p.stage_id, Some(stage_ids(&conn)[0]));
+    }
+
+    #[test]
+    fn upsert_lands_new_prospect_in_the_messaging_stage() {
+        let conn = setup();
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        assert_eq!(p.stage_id, Some(stage_ids(&conn)[0]));
         assert_eq!(p.messages_sent, 0);
     }
 
@@ -243,68 +259,72 @@ mod tests {
         .unwrap();
     }
 
+    /// The behavior change the shared pipeline buys: re-capturing someone under a
+    /// DIFFERENT customer profile must not drag them back to the top of the
+    /// funnel. Under per-pitch pipelines it had to (their stage belonged to
+    /// another funnel); now the stage means the same thing for everyone, so
+    /// re-tagging is purely a steering change.
     #[test]
-    fn upsert_preserves_stage_on_same_pitch_recapture() {
+    fn recapture_never_moves_a_prospect_on_the_board() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn, "P");
+        let a = seed_customer(&conn, "A");
+        let b = seed_customer(&conn, "B");
+        let stages = stage_ids(&conn);
         let url = "https://li/ada";
-        let p = upsert(&conn, "Ada", url, "", Some(pitch), "").unwrap();
-        // Advance them into the pipeline and rack up messages.
+
+        let p = upsert(&conn, "Ada", url, "", Some(a), "").unwrap();
         set_stage(&conn, p.id, stages[2]).unwrap();
         seed_messages_sent(&conn, p.id, 3);
-        // Re-capture on the same pitch must not reset stage/messages.
-        let again = upsert(&conn, "Ada", url, "New headline", Some(pitch), "").unwrap();
-        assert_eq!(again.stage_id, Some(stages[2]));
-        assert_eq!(again.messages_sent, 3);
-        assert_eq!(again.headline, "New headline");
+
+        // Same profile, then a different one — neither disturbs their position.
+        let same = upsert(&conn, "Ada", url, "New headline", Some(a), "").unwrap();
+        assert_eq!(same.stage_id, Some(stages[2]));
+        assert_eq!(same.messages_sent, 3);
+
+        let moved = upsert(&conn, "Ada", url, "", Some(b), "").unwrap();
+        assert_eq!(moved.customer_id, Some(b), "the profile is re-tagged");
+        assert_eq!(moved.stage_id, Some(stages[2]), "their progress is not");
+        assert_eq!(moved.messages_sent, 3);
     }
 
     #[test]
-    fn upsert_moves_stage_on_pitch_change_but_keeps_message_count() {
+    fn set_stage_accepts_any_pipeline_stage_and_rejects_a_missing_one() {
         let conn = setup();
-        let (pitch_a, stages_a) = seed_pitch_with_stages(&conn, "A");
-        let (pitch_b, stages_b) = seed_pitch_with_stages(&conn, "B");
-        let url = "https://li/ada";
-        let p = upsert(&conn, "Ada", url, "", Some(pitch_a), "").unwrap();
-        set_stage(&conn, p.id, stages_a[2]).unwrap();
-        seed_messages_sent(&conn, p.id, 5);
-        // Re-capture onto a different pitch: land in B's messaging stage. The
-        // derived count is NOT reset — it reflects real messages sent to them.
-        let moved = upsert(&conn, "Ada", url, "", Some(pitch_b), "").unwrap();
-        assert_eq!(moved.stage_id, Some(stages_b[0]));
-        assert_eq!(moved.messages_sent, 5);
-    }
-
-    #[test]
-    fn set_stage_rejects_stage_from_another_pitch() {
-        let conn = setup();
-        let (pitch_a, stages_a) = seed_pitch_with_stages(&conn, "A");
-        let (_pitch_b, stages_b) = seed_pitch_with_stages(&conn, "B");
-        let p = upsert(&conn, "Ada", "https://li/ada", "", Some(pitch_a), "").unwrap();
-        // A stage from pitch B is not valid for a pitch-A prospect.
-        assert!(set_stage(&conn, p.id, stages_b[1]).unwrap().is_none());
-        // A stage from its own pitch works.
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
         assert_eq!(
-            set_stage(&conn, p.id, stages_a[1]).unwrap().unwrap().stage_id,
-            Some(stages_a[1])
+            set_stage(&conn, p.id, stages[1]).unwrap().unwrap().stage_id,
+            Some(stages[1])
         );
+        assert!(set_stage(&conn, p.id, 9999).unwrap().is_none());
     }
 
     #[test]
-    fn find_by_url_returns_prospect_with_pitch_or_none() {
+    fn set_customer_retags_and_can_clear() {
         let conn = setup();
-        let pitch = seed_pitch(&conn, "Design-in-code");
-        let url = "https://www.linkedin.com/in/ada/";
-        upsert(&conn, "Ada", url, "Analyst", Some(pitch), "").unwrap();
+        let customer = seed_customer(&conn, "Agencies");
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        set_stage(&conn, p.id, stages[2]).unwrap();
 
-        let found = find_by_url(&conn, url).unwrap().expect("prospect exists");
-        assert_eq!(found.name, "Ada");
-        assert_eq!(found.pitch_id, Some(pitch));
+        let tagged = set_customer(&conn, p.id, Some(customer)).unwrap().unwrap();
+        assert_eq!(tagged.customer_id, Some(customer));
+        assert_eq!(tagged.stage_id, Some(stages[2]), "re-tagging never moves them");
 
-        // An untracked person has no row.
-        assert!(find_by_url(&conn, "https://www.linkedin.com/in/nobody/")
-            .unwrap()
-            .is_none());
+        let cleared = set_customer(&conn, p.id, None).unwrap().unwrap();
+        assert_eq!(cleared.customer_id, None);
+
+        assert!(set_customer(&conn, 999, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_customer_rejects_an_unknown_profile() {
+        let conn = setup();
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        assert!(
+            set_customer(&conn, p.id, Some(9999)).is_err(),
+            "the foreign key rejects a customer profile that doesn't exist"
+        );
     }
 
     #[test]
@@ -322,16 +342,21 @@ mod tests {
         assert_eq!(delete(&conn, 999).unwrap(), 0);
     }
 
+    /// Deleting a customer profile unassigns its prospects rather than deleting
+    /// them — the SET NULL safety net, which is now the *intended* behavior
+    /// rather than a fallback (the old pitch delete removed its prospects).
     #[test]
-    fn deleting_pitch_nulls_prospect_link() {
+    fn deleting_a_customer_leaves_the_prospect_in_the_pipeline() {
         let conn = setup();
-        let pitch = seed_pitch(&conn, "Temp");
+        let customer = seed_customer(&conn, "Temp");
         let url = "https://www.linkedin.com/in/y/";
-        upsert(&conn, "Y", url, "", Some(pitch), "").unwrap();
+        upsert(&conn, "Y", url, "", Some(customer), "").unwrap();
 
-        conn.execute("DELETE FROM pitches WHERE id = ?1", [pitch]).unwrap();
+        conn.execute("DELETE FROM customers WHERE id = ?1", [customer])
+            .unwrap();
 
         let after = &list(&conn).unwrap()[0];
-        assert_eq!(after.pitch_id, None); // ON DELETE SET NULL kept the prospect.
+        assert_eq!(after.customer_id, None);
+        assert!(after.stage_id.is_some(), "still on the board");
     }
 }

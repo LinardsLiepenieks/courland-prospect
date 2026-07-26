@@ -5,7 +5,7 @@
 //! + watchlist, asks the app to draft a comment per post, and auto-posts approved
 //! drafts, paced.
 //!
-//! A vertical slice like `features::pitches`: `model` (data shape), `repository`
+//! A vertical slice like `features::customers`: `model` (data shape), `repository`
 //! (all SQL), `commands` (the Tauri entry points the Comments tab calls). The
 //! repository is `pub(crate)` because the ingest server drives the same data — the
 //! extension's half of the flow.

@@ -36,6 +36,12 @@ fn limiter() -> &'static Semaphore {
 /// returns nothing, the UI shows the same actionable line.
 const GENERIC_ERROR: &str = "Couldn't reach Claude Code. Make sure it's installed and try again.";
 
+/// A generation that hit [`TIMEOUT`] is a different problem from a missing binary,
+/// and telling the user to check their install sends them the wrong way. The usual
+/// cause is an oversized prompt (a very large snippet library), so name that.
+const TIMEOUT_ERROR: &str =
+    "Claude Code took too long to respond. This usually means there's too much material to send — try trimming your snippet library.";
+
 /// Hard ceiling on a single CLI invocation. A generation that stalls past this
 /// (hung network, wedged process) is killed so the UI button can't spin forever
 /// and repeated hangs can't starve the blocking thread pool.
@@ -111,7 +117,7 @@ pub fn run(prompt: &Prompt) -> Result<String, String> {
                     let _ = child.kill();
                     let _ = child.wait();
                     eprintln!("ai: `claude` timed out after {}s", TIMEOUT.as_secs());
-                    return Err(GENERIC_ERROR.to_string());
+                    return Err(TIMEOUT_ERROR.to_string());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }

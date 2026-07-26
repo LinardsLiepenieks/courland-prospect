@@ -1,8 +1,8 @@
 //! Watchlist feature — the hand-curated list of LinkedIn profiles a comment run
 //! checks for new posts, on top of the main feed. A global list (not scoped to a
-//! pitch, not per-prospect); the user manages it from the Profile tab.
+//! customer profile, not per-prospect); the user manages it from the Profile tab.
 //!
-//! Standard per-feature layout (see `features::pitches`): `model` / `repository` /
+//! Standard per-feature layout (see `features::customers`): `model` / `repository` /
 //! `commands` / `mod`. Register its commands in `lib.rs`.
 //!
 //! `model` and `repository` are `pub(crate)` (not private) because the loopback

@@ -2,10 +2,9 @@
 //! design: lock the shared connection, trim input, delegate to `repository`, and
 //! map errors to strings the UI can display.
 //!
-//! `pitch_id` is `Option<i64>`: `Some(id)` scopes to that pitch, `None` to the
-//! global profile. Names and contents are intentionally *not* required — a
-//! freshly-added snippet is blank and filled in later — so nothing here rejects
-//! an empty string.
+//! There is one library, so none of these take a scope. Names and contents are
+//! intentionally *not* required — a freshly-added snippet is blank and filled in
+//! later — so nothing here rejects an empty string.
 //!
 //! Two commands (`update_snippet`, `approve_snippet`) additionally kick off the
 //! background `classify` pass after they persist, so a snippet's arc `position` and
@@ -13,25 +12,25 @@
 //! That pass is fire-and-forget: it never blocks the command's response, and the UI
 //! learns of the result via the `snippets://changed` event.
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use super::model::Snippet;
-use super::{classify, repository, SNIPPETS_CHANGED};
+use super::{classify, repository};
 use crate::database::AppState;
 use crate::util::{bounded, MAX_NAME_LEN, MAX_TEXT_LEN};
 
 #[tauri::command]
-pub fn list_snippets(state: State<AppState>, pitch_id: Option<i64>) -> Result<Vec<Snippet>, String> {
+pub fn list_snippets(state: State<AppState>) -> Result<Vec<Snippet>, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    repository::list(&conn, pitch_id).map_err(|e| e.to_string())
+    repository::list(&conn).map_err(|e| e.to_string())
 }
 
-/// Create a blank snippet owned by `pitch_id` (or the profile when `None`) and
-/// return it so the UI can render the new card with its server id.
+/// Create a blank snippet and return it so the UI can render the new card with
+/// its server id.
 #[tauri::command]
-pub fn create_snippet(state: State<AppState>, pitch_id: Option<i64>) -> Result<Snippet, String> {
+pub fn create_snippet(state: State<AppState>) -> Result<Snippet, String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
-    repository::create(&conn, pitch_id).map_err(|e| e.to_string())
+    repository::create(&conn).map_err(|e| e.to_string())
 }
 
 /// Persist a snippet's name + content, then (if it now has content) fire the
@@ -119,58 +118,13 @@ pub fn set_snippet_category(
     Ok(snippet)
 }
 
-/// Copy a snippet into another scope as an independent duplicate: a fresh `approved`
-/// row owned by `target_pitch_id` (a pitch id, or `None` for the global profile)
-/// carrying the source's name + content. The copy re-classifies in its new scope, so
-/// after persisting we fire the classify pass for the new id, then emit
-/// `SNIPPETS_CHANGED` for the target scope so an open editor there folds it in. The
-/// source is untouched (single-owner model preserved — this adds a row, never moves
-/// one). Returns the new snippet.
-#[tauri::command]
-pub fn copy_snippet(
-    app: AppHandle,
-    state: State<AppState>,
-    id: i64,
-    target_pitch_id: Option<i64>,
-) -> Result<Snippet, String> {
-    let snippet = {
-        let conn = state.conn.lock().map_err(|e| e.to_string())?;
-        match repository::copy(&conn, id, target_pitch_id) {
-            Ok(Some(snippet)) => snippet,
-            Ok(None) => return Err("Snippet not found.".into()),
-            // The target pitch was deleted between opening the menu and picking it,
-            // so the insert trips the foreign-key constraint. Surface a plain
-            // message instead of the raw "FOREIGN KEY constraint failed".
-            Err(e) if is_foreign_key_violation(&e) => {
-                return Err("That pitch no longer exists.".into())
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let _ = app.emit(SNIPPETS_CHANGED, target_pitch_id);
-    classify::spawn(app, snippet.id);
-    Ok(snippet)
-}
-
-/// Re-score AND re-categorize every approved snippet in a scope through the AI — the
+/// Re-score AND re-categorize every approved snippet through the AI — the
 /// "reorganize my whole library" button. A full reset: it overrides hand-picked
 /// (`manual`) categories and hands each row back to auto-classification. Runs to
 /// completion on the interactive CLI path and emits `snippets://changed` ONCE when
-/// the whole batch finishes (not per snippet), so any other open editor for the
-/// scope reconciles in a single reshuffle; returns how many snippets it changed.
-/// `pitch_id` scopes it (a pitch id, or `None` for the profile) — mirrors
-/// `list_snippets`.
+/// the whole batch finishes (not per snippet), so any other open editor reconciles
+/// in a single reshuffle; returns how many snippets it changed.
 #[tauri::command]
-pub async fn reclassify_snippets(app: AppHandle, pitch_id: Option<i64>) -> Result<usize, String> {
-    classify::reclassify_all(app, pitch_id).await
-}
-
-/// True when a rusqlite error is specifically a foreign-key constraint violation —
-/// the signal that a copy's target pitch no longer exists.
-fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(f, _)
-            if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
-    )
+pub async fn reclassify_snippets(app: AppHandle) -> Result<usize, String> {
+    classify::reclassify_all(app).await
 }

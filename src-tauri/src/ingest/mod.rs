@@ -7,7 +7,7 @@
 //!
 //!  - `config`   — token + port provisioning; ships the extension into a writable dir
 //!  - `chrome`   — find/open the user's Chrome; process check; profile enumeration
-//!  - `server`   — axum server on Tauri's runtime (GET /health, /pitches;
+//!  - `server`   — axum server on Tauri's runtime (GET /health, /customers;
 //!                 POST /prospects, /messages, /draft)
 //!  - `security` — pure Host/token/Origin checks (unit-tested)
 //!  - `gate`     — GateStatus (heartbeat + process) + commands + events

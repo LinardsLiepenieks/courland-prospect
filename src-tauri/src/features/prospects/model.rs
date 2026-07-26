@@ -11,11 +11,13 @@ pub struct Prospect {
     pub linkedin_url: String,
     /// Their headline/title as scraped, if any.
     pub headline: String,
-    /// The pitch being run on them. `None` if they were added without a pitch;
-    /// deleting a pitch deletes its prospects, so a delete never strands a null here.
-    pub pitch_id: Option<i64>,
-    /// The pipeline stage they're currently in. `None` if unassigned (no pitch,
-    /// or the stage was deleted out from under them via the SET NULL safety net).
+    /// The customer profile they match — what steers their drafts toward a goal.
+    /// `None` when unassigned, which is a valid resting state: everyone is in the
+    /// same pipeline regardless, their drafts simply get no customer block.
+    /// Deleting a customer profile leaves its prospects here, unassigned.
+    pub customer_id: Option<i64>,
+    /// The pipeline stage they're currently in. `None` only if the stage was
+    /// deleted out from under them via the SET NULL safety net.
     pub stage_id: Option<i64>,
     /// Outreach counter shown in the messaging stage — how many messages sent.
     pub messages_sent: i64,
@@ -36,7 +38,7 @@ impl Prospect {
             name: row.get("name")?,
             linkedin_url: row.get("linkedin_url")?,
             headline: row.get("headline")?,
-            pitch_id: row.get("pitch_id")?,
+            customer_id: row.get("customer_id")?,
             stage_id: row.get("stage_id")?,
             messages_sent: row.get("messages_sent")?,
             awaiting_reply: row.get("awaiting_reply")?,

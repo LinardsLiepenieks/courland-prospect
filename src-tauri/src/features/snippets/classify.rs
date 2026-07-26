@@ -37,7 +37,7 @@ pub(crate) fn spawn(app: AppHandle, snippet_id: i64) {
 /// Gather → classify → write, all best-effort. Every fallible step logs and returns
 /// rather than propagating; this is fire-and-forget.
 async fn run(app: AppHandle, snippet_id: i64) {
-    // Gather under one lock: the snippet, and its scope's existing categories (so
+    // Gather under one lock: the snippet, and the library's existing categories (so
     // the model reuses a fitting one). Only approved, non-blank, non-manual snippets
     // are classified — a blank card has nothing to place, a proposal is shown
     // separately until approved, and a manual row is off-limits.
@@ -56,14 +56,13 @@ async fn run(app: AppHandle, snippet_id: i64) {
             {
                 return Ok(None);
             }
-            let existing = repository::existing_categories(&conn, snippet.pitch_id)
-                .map_err(|e| e.to_string())?;
-            Ok(Some((snippet.pitch_id, snippet.content, existing)))
+            let existing = repository::existing_categories(&conn).map_err(|e| e.to_string())?;
+            Ok(Some((snippet.content, existing)))
         })
         .await
     };
 
-    let (scope, content, existing) = match gathered {
+    let (content, existing) = match gathered {
         Ok(Ok(Some(v))) => v,
         Ok(Ok(None)) => return, // deleted, blank, proposed, or manual — nothing to do
         Ok(Err(e)) => {
@@ -124,8 +123,8 @@ async fn run(app: AppHandle, snippet_id: i64) {
 
     match wrote {
         Ok(Ok(true)) => {
-            // Nudge an open editor for this scope to reload and re-sort/re-chip.
-            let _ = app.emit(SNIPPETS_CHANGED, scope);
+            // Nudge an open editor to reload and re-sort/re-chip.
+            let _ = app.emit(SNIPPETS_CHANGED, ());
         }
         Ok(Ok(false)) => {} // nothing written — no event
         Ok(Err(e)) => eprintln!("snippets: classify write failed: {e}"),
@@ -133,26 +132,25 @@ async fn run(app: AppHandle, snippet_id: i64) {
     }
 }
 
-/// Re-score AND re-categorize every approved snippet in a scope — the user-initiated
-/// "reorganize my whole library" action. Unlike the per-edit [`run`] pass, this is a
-/// full reset: it classifies each snippet in turn and force-writes the result,
-/// deliberately overriding a hand-picked (`manual`) category and handing the row back
-/// to auto. It runs on the interactive CLI path ([`run_capped`], which queues rather
+/// Re-score AND re-categorize every approved snippet in the library — the
+/// user-initiated "reorganize my whole library" action. Unlike the per-edit [`run`]
+/// pass, this is a full reset: it classifies each snippet in turn and force-writes the
+/// result, deliberately overriding a hand-picked (`manual`) category and handing the row
+/// back to auto. It runs on the interactive CLI path ([`run_capped`], which queues rather
 /// than skipping) so it always completes, and emits `SNIPPETS_CHANGED` once when it
-/// finishes so any other open editor for the scope reconciles in a single reshuffle.
+/// finishes so any other open editor reconciles in a single reshuffle.
 /// Returns how many snippets it changed.
 ///
 /// Snippets are processed openers-first and the stage-label set is accumulated as we
 /// go (starting empty), so the batch mints a fresh, self-consistent set of stages
-/// instead of snapping back to the scope's old (topic-style) categories.
-pub(crate) async fn reclassify_all(app: AppHandle, pitch_id: Option<i64>) -> Result<usize, String> {
+/// instead of snapping back to the library's old (topic-style) categories.
+pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
     let items: Vec<(i64, String)> = {
         let app = app.clone();
         tokio::task::spawn_blocking(move || {
             let st = app.state::<AppState>();
             let conn = st.conn.lock().map_err(|e| e.to_string())?;
-            let mut approved =
-                repository::list_approved(&conn, pitch_id).map_err(|e| e.to_string())?;
+            let mut approved = repository::list_approved(&conn).map_err(|e| e.to_string())?;
             approved.retain(|s| !s.content.trim().is_empty());
             // Openers first, so the earliest items seed the labels later ones snap to.
             approved.sort_by(|a, b| a.position.total_cmp(&b.position));
@@ -178,7 +176,13 @@ pub(crate) async fn reclassify_all(app: AppHandle, pitch_id: Option<i64>) -> Res
                 continue;
             }
         };
+        // An unparseable reply is a failed classification, not a no-op: count it
+        // with the generation errors so a classifier that answers every prompt
+        // with garbage can't come back as a reassuring `0 changed`.
         let Some((position, category)) = parse_classification(&raw) else {
+            eprintln!("snippets: reclassify could not parse the classifier's reply");
+            gen_errors += 1;
+            last_err = "the classifier's reply couldn't be parsed".to_string();
             continue;
         };
         let (position, category) = finalize_classification(position, &category, &existing);
@@ -237,10 +241,10 @@ pub(crate) async fn reclassify_all(app: AppHandle, pitch_id: Option<i64>) -> Res
     // Emit once, after the whole batch — not per row. A per-row emit made an open editor
     // reload and re-group repeatedly mid-batch, so cards visibly blinked out as they
     // re-homed into (collapsed) sections one at a time. One terminal event lets any
-    // other open editor for this scope reconcile to the finished state in a single
-    // reshuffle; the window that launched the batch reloads via its own await.
+    // other open editor reconcile to the finished state in a single reshuffle; the
+    // window that launched the batch reloads via its own await.
     if count > 0 {
-        let _ = app.emit(SNIPPETS_CHANGED, pitch_id);
+        let _ = app.emit(SNIPPETS_CHANGED, ());
     }
     Ok(count)
 }

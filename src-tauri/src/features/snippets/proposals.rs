@@ -3,10 +3,15 @@
 //! When the Chrome extension captures a genuinely-new outgoing message for a
 //! prospect (see `features::messages::store_batch`), the ingest server hands the
 //! new messages here. For each prospect we ask the local Claude Code CLI to extract
-//! reusable pitch material the message contains that isn't already a snippet, and
-//! store each as a `proposed` snippet on that prospect's pitch — shown in the editor
-//! in a distinct color, awaiting the user's approve/reject. Proposals never compose
-//! a draft until approved.
+//! reusable material the message contains that isn't already a snippet, and store
+//! each as a `proposed` snippet in the library — shown in the editor in a distinct
+//! color, awaiting the user's approve/reject. Proposals never compose a draft until
+//! approved.
+//!
+//! Messages are still grouped per prospect so each pass sees one coherent thread,
+//! but proposals land in the one shared library regardless of who they came from —
+//! and every prospect now yields proposals, including ones with no customer profile
+//! assigned (there is no per-scope library left to be missing).
 //!
 //! This runs fire-and-forget off the ingest response (`spawn`): a missed proposal
 //! is logged and dropped, never surfaced as an error — the same phrase re-proposes
@@ -15,9 +20,10 @@
 //! Two hard guarantees are enforced in code, not left to the model:
 //!   - **Verbatim** — a proposal's content must appear (whitespace-normalized) in the
 //!     message the user actually sent, or it's discarded ([`is_verbatim`]).
-//!   - **No exact duplicates** — a proposal whose content already exists on the pitch
-//!     (any status) is skipped; the dedup read and the insert share one connection
-//!     lock, so concurrent passes can't both insert the same text ([`run_one`]).
+//!   - **No exact duplicates** — a proposal whose content already exists in the
+//!     library (any status) is skipped; the dedup read and the insert share one
+//!     connection lock, so concurrent passes can't both insert the same text
+//!     ([`run_one`]).
 //!
 //! Between extraction and insert sits a second, best-effort LLM pass — the reviewer
 //! ([`review_candidates`]). `propose` is generative and errs toward proposing; the
@@ -38,7 +44,7 @@ use super::SNIPPETS_CHANGED;
 use crate::ai::{self, Prompt, ProposeContext, ReviewContext};
 use crate::database::AppState;
 use crate::features::messages::repository::NewOutgoing;
-use crate::features::{pitches, prospects};
+use crate::features::product;
 use crate::util::{MAX_NAME_LEN, MAX_TEXT_LEN};
 
 /// Upper bound on proposals accepted from a single analysis pass — keeps a confused
@@ -65,42 +71,37 @@ async fn run(app: AppHandle, new_outgoing: Vec<NewOutgoing>) {
     for m in new_outgoing {
         by_prospect.entry(m.prospect_id).or_default().push(m.body);
     }
-    for (prospect_id, messages) in by_prospect {
-        run_one(&app, prospect_id, &messages).await;
+    for (_prospect_id, messages) in by_prospect {
+        run_one(&app, &messages).await;
     }
 }
 
-/// One prospect's pass: gather the pitch context + existing snippets, ask Claude for
-/// proposals, then verbatim-check, dedup, and insert the survivors. All fallible
+/// One thread's pass: gather the product context + the existing library, ask Claude
+/// for proposals, then verbatim-check, dedup, and insert the survivors. All fallible
 /// steps log and return rather than propagate — this is fire-and-forget.
-async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
-    // Gather everything the prompt needs under one lock. `None` = no pitch to
-    // propose into (a prospect with no pitch has no snippet library) → skip.
+async fn run_one(app: &AppHandle, messages: &[String]) {
+    // Gather everything the prompt needs under one lock: what's being sold, and
+    // every snippet already in the library (all statuses, so the model doesn't
+    // re-propose something already awaiting review).
     let gathered = {
         let app = app.clone();
         tokio::task::spawn_blocking(move || {
             let st = app.state::<AppState>();
             let conn = st.conn.lock().map_err(|e| e.to_string())?;
-            let Some(pitch_id) = prospects::repository::pitch_id(&conn, prospect_id)
-                .map_err(|e| e.to_string())?
-            else {
-                return Ok::<_, String>(None);
-            };
-            let pitch = pitches::repository::get(&conn, pitch_id).map_err(|e| e.to_string())?;
-            let existing: Vec<(String, String)> = repository::list(&conn, Some(pitch_id))
+            let product = product::repository::get(&conn).map_err(|e| e.to_string())?;
+            let existing: Vec<(String, String)> = repository::list(&conn)
                 .map_err(|e| e.to_string())?
                 .into_iter()
                 .filter(|s| !s.content.trim().is_empty())
                 .map(|s| (s.name, s.content))
                 .collect();
-            Ok(Some((pitch_id, pitch.name, pitch.skill, existing)))
+            Ok::<_, String>((product.name, product.description, existing))
         })
         .await
     };
 
-    let (pitch_id, pitch_name, pitch_skill, existing) = match gathered {
-        Ok(Ok(Some(v))) => v,
-        Ok(Ok(None)) => return, // prospect has no pitch — nothing to propose into
+    let (product_name, product_description, existing) = match gathered {
+        Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             eprintln!("snippets: propose gather failed: {e}");
             return;
@@ -112,8 +113,8 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
     };
 
     let ctx = ProposeContext {
-        pitch_name: &pitch_name,
-        pitch_skill: &pitch_skill,
+        product_name: &product_name,
+        product_description: &product_description,
         existing_snippets: &existing,
         messages,
     };
@@ -143,27 +144,27 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
         return;
     }
 
-    // Reviewer gate: a second LLM pass judges each candidate against the pitch and the
-    // existing library, rejecting one-off (conversation-specific) lines and semantic
-    // duplicates the exact-match dedup below can't catch. `None` = no spare CLI
-    // capacity, so skip the whole pass and let the phrase re-propose on the next send.
-    let candidates = match review_candidates(&pitch_name, &pitch_skill, &existing, candidates).await
-    {
-        Some(kept) => kept,
-        None => return,
-    };
+    // Reviewer gate: a second LLM pass judges each candidate against the product and
+    // the existing library, rejecting one-off (conversation-specific) lines and
+    // semantic duplicates the exact-match dedup below can't catch. `None` = no spare
+    // CLI capacity, so skip the whole pass and let the phrase re-propose next send.
+    let candidates =
+        match review_candidates(&product_name, &product_description, &existing, candidates).await {
+            Some(kept) => kept,
+            None => return,
+        };
     if candidates.is_empty() {
         return; // reviewer rejected everything — nothing to insert
     }
 
-    // Dedup against the pitch's existing contents and insert — one lock, so a
+    // Dedup against the library's existing contents and insert — one lock, so a
     // concurrent pass can't slip an identical proposal in between our check and
     // insert. Also dedups within this batch itself.
     let app2 = app.clone();
     let inserted = tokio::task::spawn_blocking(move || {
         let st = app2.state::<AppState>();
         let conn = st.conn.lock().map_err(|e| e.to_string())?;
-        let mut seen: Vec<String> = repository::dedup_contents(&conn, pitch_id)
+        let mut seen: Vec<String> = repository::dedup_contents(&conn)
             .map_err(|e| e.to_string())?
             .iter()
             .map(|c| normalize_key(c))
@@ -177,8 +178,7 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
             if seen.contains(&key) {
                 continue; // already approved, already proposed, or a repeat in this batch
             }
-            repository::create_proposed(&conn, pitch_id, &name, &content)
-                .map_err(|e| e.to_string())?;
+            repository::create_proposed(&conn, &name, &content).map_err(|e| e.to_string())?;
             seen.push(key);
             count += 1;
         }
@@ -189,9 +189,8 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
     match inserted {
         Ok(Ok(0)) => {} // everything was a duplicate — nothing to announce
         Ok(Ok(_)) => {
-            // Nudge an open editor for this pitch to reload and show the proposals.
-            // Payload is the scope (`Some(pitch_id)` — proposals are always pitched).
-            let _ = app.emit(SNIPPETS_CHANGED, Some(pitch_id));
+            // Nudge an open editor to reload and show the proposals.
+            let _ = app.emit(SNIPPETS_CHANGED, ());
         }
         Ok(Err(e)) => eprintln!("snippets: propose insert failed: {e}"),
         Err(e) => eprintln!("snippets: propose insert task panicked: {e}"),
@@ -205,14 +204,14 @@ async fn run_one(app: &AppHandle, prospect_id: i64, messages: &[String]) {
 /// unparseable verdict degrades to `Some(candidates)` (the un-reviewed set), so a
 /// reviewer hiccup never silently discards genuinely-new material.
 async fn review_candidates(
-    pitch_name: &str,
-    pitch_skill: &str,
+    product_name: &str,
+    product_description: &str,
     existing: &[(String, String)],
     candidates: Vec<(String, String)>,
 ) -> Option<Vec<(String, String)>> {
     let ctx = ReviewContext {
-        pitch_name,
-        pitch_skill,
+        product_name,
+        product_description,
         existing_snippets: existing,
         candidates: &candidates,
     };

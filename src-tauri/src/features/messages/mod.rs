@@ -4,7 +4,7 @@
 //! message is incoming). This is the one centralized writer of extension-derived
 //! prospect state.
 //!
-//! Unlike the reference `pitches` slice, this one is **write-only for now**: rows
+//! Unlike the reference `customers` slice, this one is **write-only for now**: rows
 //! are written by the Chrome extension over the loopback ingest server
 //! (`crate::ingest`, which calls `repository` directly — hence `pub(crate)`), and
 //! nothing in the desktop UI reads them yet. So there is deliberately no `model`

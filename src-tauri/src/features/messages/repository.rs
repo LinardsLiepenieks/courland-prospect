@@ -210,22 +210,17 @@ mod tests {
         conn
     }
 
-    /// Seed a pitch with a full-cycle pipeline; return (pitch_id, ordered stage ids).
-    fn seed_pitch_with_stages(conn: &Connection) -> (i64, Vec<i64>) {
-        conn.execute("INSERT INTO pitches (name, skill) VALUES ('P', '')", [])
-            .unwrap();
-        let pitch = conn.last_insert_rowid();
-        let created =
-            stages::repository::create_many(conn, pitch, &stages::repository::full_cycle_template())
-                .unwrap();
-        (pitch, created.into_iter().map(|s| s.id).collect())
+    /// The one shared pipeline's stage ids, in funnel order. Migration 0024 seeds
+    /// the Full-cycle template on a fresh database, so there's nothing to create.
+    fn pipeline_stages(conn: &Connection) -> Vec<i64> {
+        stages::repository::list(conn).unwrap().into_iter().map(|s| s.id).collect()
     }
 
     /// Insert a prospect directly on a given stage; return its id.
-    fn seed_prospect(conn: &Connection, url: &str, pitch: i64, stage: i64) -> i64 {
+    fn seed_prospect(conn: &Connection, url: &str, stage: i64) -> i64 {
         conn.execute(
-            "INSERT INTO prospects (name, linkedin_url, pitch_id, stage_id) VALUES ('N', ?1, ?2, ?3)",
-            params![url, pitch, stage],
+            "INSERT INTO prospects (name, linkedin_url, stage_id) VALUES ('N', ?1, ?2)",
+            params![url, stage],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -262,9 +257,9 @@ mod tests {
     #[test]
     fn resolves_any_prospect_regardless_of_stage() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
+        let stages = pipeline_stages(&conn);
         let url = "https://li/ada";
-        let id = seed_prospect(&conn, url, pitch, stages[0]); // messaging stage
+        let id = seed_prospect(&conn, url, stages[0]); // messaging stage
 
         assert_eq!(prospect_id_by_url(&conn, url).unwrap(), Some(id));
 
@@ -284,8 +279,8 @@ mod tests {
     #[test]
     fn store_dedups_and_recompute_counts() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
 
         store(&conn, id, "k1", "hello", Some("2026-07-12"), OUTGOING).unwrap();
         store(&conn, id, "k2", "again", None, OUTGOING).unwrap();
@@ -308,9 +303,9 @@ mod tests {
     #[test]
     fn store_batch_counts_and_skips_across_a_mixed_batch() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let in_msg = seed_prospect(&conn, "https://li/ada", pitch, stages[0]); // messaging
-        let advanced = seed_prospect(&conn, "https://li/grace", pitch, stages[1]); // past messaging
+        let stages = pipeline_stages(&conn);
+        let in_msg = seed_prospect(&conn, "https://li/ada", stages[0]); // messaging
+        let advanced = seed_prospect(&conn, "https://li/grace", stages[1]); // past messaging
 
         let batch = [
             out("https://li/ada", "k1", "one"),
@@ -342,9 +337,9 @@ mod tests {
     #[test]
     fn incoming_reply_sets_awaiting_reply_at_any_stage() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
+        let stages = pipeline_stages(&conn);
         // A prospect who has been advanced past the messaging stage.
-        let advanced = seed_prospect(&conn, "https://li/ada", pitch, stages[2]);
+        let advanced = seed_prospect(&conn, "https://li/ada", stages[2]);
 
         let out = store_batch(
             &conn,
@@ -367,10 +362,10 @@ mod tests {
     #[test]
     fn awaiting_reply_clears_when_we_answer_and_toggles_back_on_the_next_reply() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
+        let stages = pipeline_stages(&conn);
         // Advanced past messaging — the case the old messaging-stage gate broke:
         // our answers must still be recorded so the flag can clear.
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[2]);
+        let id = seed_prospect(&conn, "https://li/ada", stages[2]);
 
         // We message first — newest is ours → not awaiting.
         store_batch(&conn, &[out("https://li/ada", "o1", "hi there")]).unwrap();
@@ -393,8 +388,8 @@ mod tests {
     #[test]
     fn rescrape_misclassifying_a_reply_cannot_unset_awaiting_reply() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
 
         // Their reply lands as incoming under a stable key and is the newest.
         store(&conn, id, "urn:msg:1", "yes let's talk", None, INCOMING).unwrap();
@@ -414,8 +409,8 @@ mod tests {
     #[test]
     fn degraded_rescrape_cannot_clobber_a_good_body_or_timestamp() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
 
         // A settled capture with a real body + timestamp.
         store(&conn, id, "k1", "let's chat next week", Some("2026-07-12"), OUTGOING).unwrap();
@@ -461,9 +456,9 @@ mod tests {
     #[test]
     fn resolution_requires_the_exact_canonical_url() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
+        let stages = pipeline_stages(&conn);
         let canonical = "https://www.linkedin.com/in/ada-lovelace/";
-        let id = seed_prospect(&conn, canonical, pitch, stages[0]); // messaging stage
+        let id = seed_prospect(&conn, canonical, stages[0]); // messaging stage
 
         // Exact canonical form resolves via the single storage-gate lookup.
         assert_eq!(prospect_id_by_url(&conn, canonical).unwrap(), Some(id));
@@ -486,8 +481,8 @@ mod tests {
     #[test]
     fn deleting_prospect_cascades_messages() {
         let conn = setup();
-        let (pitch, stages) = seed_pitch_with_stages(&conn);
-        let id = seed_prospect(&conn, "https://li/ada", pitch, stages[0]);
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
         store(&conn, id, "k1", "hi", None, OUTGOING).unwrap();
 
         conn.execute("DELETE FROM prospects WHERE id = ?1", [id]).unwrap();

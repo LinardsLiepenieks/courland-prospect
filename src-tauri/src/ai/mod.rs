@@ -6,8 +6,8 @@
 //! the `client`.
 //!
 //!  - `prompt` — a reusable `Prompt` (instruction + input) with named
-//!               constructors per use (`Prompt::polish_skill`); `render`s to the
-//!               single string handed to the CLI.
+//!               constructors per use (`Prompt::polish_product`); `render`s to
+//!               the single string handed to the CLI.
 //!  - `client` — runs a `Prompt` through the local `claude` CLI (headless
 //!               `-p` mode), reusing the user's own Claude Code install/auth.
 
@@ -16,6 +16,6 @@ pub mod commands;
 pub mod prompt;
 
 pub use prompt::{
-    comment_is_skip, BrokenSelector, ClassifyContext, CommentContext, DraftContext, DraftMessage,
-    DraftSnippet, Prompt, ProposeContext, ReviewContext,
+    comment_is_skip, BrokenSelector, ClassifyContext, CommentContext, DraftContext, DraftCustomer,
+    DraftMessage, DraftSnippet, Prompt, ProposeContext, ReviewContext,
 };

@@ -3,8 +3,8 @@
 //! guard. Capture + drafting:
 //!
 //!   GET  /health    — extension check-in / liveness
-//!   GET  /pitches   — feeds the dropdown (reuses the pitches repository)
-//!   GET  /prospect  — is this person a prospect, and on which pitch (by URL)
+//!   GET  /customers — feeds the dropdown (reuses the customers repository)
+//!   GET  /prospect  — is this person a prospect, and which customer (by URL)
 //!   POST /prospects — captures a prospect (upsert; reuses the prospects repo)
 //!   POST /messages  — records captured messages, both directions (messages repo)
 //!   POST /draft     — drafts one reply for an open thread
@@ -41,11 +41,13 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use super::security::{self, TOKEN_HEADER};
 use super::{gate, Heartbeat, IngestConfig};
 use crate::ai::{
-    self, comment_is_skip, BrokenSelector, CommentContext, DraftContext, DraftMessage,
-    DraftSnippet, Prompt,
+    self, comment_is_skip, BrokenSelector, CommentContext, DraftContext, DraftCustomer,
+    DraftMessage, DraftSnippet, Prompt,
 };
 use crate::database::AppState;
-use crate::features::{comments, messages, pitches, profile, prospects, selectors, snippets, watchlist};
+use crate::features::{
+    comments, customers, messages, product, profile, prospects, selectors, snippets, watchlist,
+};
 use crate::util::{MAX_NAME_LEN, MAX_TEXT_LEN};
 
 /// Ceiling on a single ingest request body. The largest legitimate payload is a
@@ -98,7 +100,7 @@ pub async fn serve(app: AppHandle, config: IngestConfig) {
 
     let router = Router::new()
         .route("/health", get(health))
-        .route("/pitches", get(list_pitches))
+        .route("/customers", get(list_customers))
         .route("/prospect", get(lookup_prospect))
         .route("/prospects", post(create_prospect))
         .route("/messages", post(create_messages))
@@ -168,12 +170,25 @@ async fn health() -> Response {
     Json(serde_json::json!({ "ok": true, "app": "courland-prospect" })).into_response()
 }
 
-async fn list_pitches(State(state): State<ServerState>) -> Response {
+/// Serve the customer profiles for the extension's capture dropdown — which kind
+/// of buyer this person is, so their drafts get steered toward that profile's
+/// goal. Reads only.
+///
+/// Projected down to `{id, name}`: that's all the dropdown renders, and the rest
+/// of a profile is the user's private positioning work (who they are, their pain,
+/// the goal). The draft prompt reads that server-side, so there is no reason to
+/// hand it to a content script running inside a LinkedIn page.
+async fn list_customers(State(state): State<ServerState>) -> Response {
     let app = state.app.clone();
     let result = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let conn = st.conn.lock().map_err(|e| e.to_string())?;
-        pitches::repository::list(&conn).map_err(|e| e.to_string())
+        let list = customers::repository::list(&conn).map_err(|e| e.to_string())?;
+        Ok::<_, String>(
+            list.into_iter()
+                .map(|c| serde_json::json!({ "id": c.id, "name": c.name }))
+                .collect::<Vec<_>>(),
+        )
     })
     .await;
 
@@ -195,12 +210,14 @@ struct ProspectQuery {
     url: String,
 }
 
-/// Look up whether the open thread's person is already a prospect, and on which
-/// pitch. Returns `{ "exists": bool, "pitch_id": number | null }` — the extension
-/// uses it to show "Prospect of <pitch>" instead of the add control, and to draft
-/// each reply from that prospect's own pitch. `pitch_id` is null when the prospect
-/// was added without a pitch — deleting a pitch removes its prospects, so a delete
-/// never strands a null-pitch row here. Reads only.
+/// Look up whether the open thread's person is already a prospect, and which
+/// customer profile they match. Returns
+/// `{ "exists": bool, "customer_id": number | null }` — the extension uses it to
+/// show "Prospect · <customer>" instead of the add control, and to steer each
+/// draft toward that profile's goal. `customer_id` is null when the prospect is
+/// unassigned (captured without one, or their profile was deleted since), which
+/// is a valid state: they stay in the pipeline and their drafts simply get no
+/// customer block. Reads only.
 async fn lookup_prospect(
     State(state): State<ServerState>,
     Query(q): Query<ProspectQuery>,
@@ -221,7 +238,7 @@ async fn lookup_prospect(
     match result {
         Ok(Ok(found)) => Json(serde_json::json!({
             "exists": found.is_some(),
-            "pitch_id": found.and_then(|p| p.pitch_id),
+            "customer_id": found.and_then(|p| p.customer_id),
         }))
         .into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -229,15 +246,21 @@ async fn lookup_prospect(
     }
 }
 
-/// Body the extension POSTs. `headline`, `pitch_id`, and `note` are optional.
+/// Body the extension POSTs. `headline`, `customer_id`, and `note` are optional.
+///
+/// `deny_unknown_fields` so a stale extension build fails loudly instead of
+/// having its unrecognized field dropped on the floor: a pre-rework build sends
+/// `pitch_id`, which would otherwise be ignored and the capture silently filed
+/// unassigned with a success toast.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewProspect {
     name: String,
     linkedin_url: String,
     #[serde(default)]
     headline: String,
     #[serde(default)]
-    pitch_id: Option<i64>,
+    customer_id: Option<i64>,
     #[serde(default)]
     note: String,
 }
@@ -267,12 +290,24 @@ async fn create_prospect(
         // Existence-before-upsert so the extension can distinguish a fresh
         // capture from a dedup update in its feedback toast.
         let existed = prospects::repository::exists(&conn, &url).map_err(|e| e.to_string())?;
+        // A profile deleted between the widget populating its dropdown and this
+        // request landing is not an error — the same race `/draft` already
+        // tolerates. Drop the dangling id rather than tripping the foreign key: a
+        // 500 here loses the capture entirely and keeps failing until the LinkedIn
+        // tab is reloaded, over a tag the user can set in one click afterwards.
+        // (`upsert` COALESCEs, so on a re-capture this leaves the existing tag.)
+        let customer_id = match body.customer_id {
+            Some(id) => customers::repository::find(&conn, id)
+                .map_err(|e| e.to_string())?
+                .map(|c| c.id),
+            None => None,
+        };
         let prospect = prospects::repository::upsert(
             &conn,
             &name,
             &url,
             body.headline.trim(),
-            body.pitch_id,
+            customer_id,
             body.note.trim(),
         )
         .map_err(|e| e.to_string())?;
@@ -308,26 +343,33 @@ struct DraftMsgIn {
 /// Body the extension POSTs to draft one reply. The conversation is scraped live
 /// from the open thread and sent here (not read from the DB), so this works for
 /// any thread — including people who aren't prospects yet. `prospect_name` is
-/// best-effort; `pitch_id` chooses which snippet library to compose from. Drafting
-/// is stateless (no prospect lookup), so no `linkedin_url` is needed here.
+/// best-effort; `customer_id` is the profile to steer toward, and is optional —
+/// omitted (or naming a since-deleted profile) simply drafts without a goal.
+/// Drafting is stateless (no prospect lookup), so no `linkedin_url` is needed.
+///
+/// `deny_unknown_fields` for the same reason as `NewProspect`: a stale build's
+/// `pitch_id` should be a visible error, not a silently unsteered draft.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DraftRequest {
     #[serde(default)]
     prospect_name: String,
-    pitch_id: i64,
+    #[serde(default)]
+    customer_id: Option<i64>,
     #[serde(default)]
     messages: Vec<DraftMsgIn>,
 }
 
-/// Draft the next reply for one open LinkedIn thread. Gathers the chosen pitch's
-/// snippets plus the global profile's snippets + profile text, builds a strict
-/// "compose only from this material" prompt, and runs it through the local Claude
-/// Code CLI (concurrency-capped in `crate::ai::client`). Returns `{ "draft": .. }`
-/// — either a composed reply or the model's ALL-CAPS reason it couldn't build one.
-/// Reads only; writes nothing to the DB.
+/// Draft the next reply for one open LinkedIn thread. Gathers the product, the
+/// founder's profile, the whole snippet library, and — when the prospect is
+/// matched — the customer profile that steers the reply toward a goal, then builds
+/// a strict "compose only from this material" prompt and runs it through the local
+/// Claude Code CLI (concurrency-capped in `crate::ai::client`). Returns
+/// `{ "draft": .. }` — either a composed reply or the model's ALL-CAPS reason it
+/// couldn't build one. Reads only; writes nothing to the DB.
 async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftRequest>) -> Response {
     let app = state.app.clone();
-    let pitch_id = body.pitch_id;
+    let customer_id = body.customer_id;
 
     // Bound untrusted browser input before it becomes a CLI argument.
     if body.prospect_name.chars().count() > MAX_NAME_LEN
@@ -341,30 +383,26 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
     let gathered = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let conn = st.conn.lock().map_err(|e| e.to_string())?;
-        let pitch = pitches::repository::get(&conn, pitch_id).map_err(|e| e.to_string())?;
+        let product = product::repository::get(&conn).map_err(|e| e.to_string())?;
         let profile = profile::repository::get(&conn).map_err(|e| e.to_string())?;
-        // Approved snippets only — an unreviewed proposal must never leak into a
-        // drafted reply.
-        let mut snippets =
-            snippets::repository::list_approved(&conn, Some(pitch_id)).map_err(|e| e.to_string())?;
-        snippets.extend(snippets::repository::list_approved(&conn, None).map_err(|e| e.to_string())?);
-        // Each scope came back position-sorted, but the concatenation isn't — sort
-        // the merged set so the model composes the reply in conversation-arc order
-        // (openers → closers). `total_cmp` is a stable total order over the floats.
-        snippets.sort_by(|a, b| a.position.total_cmp(&b.position));
-        // Copying a snippet across the pitch/profile boundary can leave the same
-        // line in both scopes; drop exact-content duplicates (case/space-insensitive)
-        // so a copied line isn't presented to the model twice. The set is already
-        // position-sorted, so `retain` keeps the earliest (lowest-position) instance.
-        let mut seen = std::collections::HashSet::new();
-        snippets.retain(|s| seen.insert(s.content.trim().to_lowercase()));
-        Ok::<_, String>((pitch, profile, snippets))
+        // A profile deleted between the extension reading the dropdown and this
+        // request landing is not an error — it just means no steering, same as an
+        // unassigned prospect.
+        let customer = match customer_id {
+            Some(id) => customers::repository::find(&conn, id).map_err(|e| e.to_string())?,
+            None => None,
+        };
+        // The whole library, approved only — an unreviewed proposal must never leak
+        // into a drafted reply. Already in conversation-arc order (openers →
+        // closers), which is the order the model composes in; picking which of these
+        // serve this customer's goal is the model's job, not a query's.
+        let snippets = snippets::repository::list_approved(&conn).map_err(|e| e.to_string())?;
+        Ok::<_, String>((product, profile, customer, snippets))
     })
     .await;
 
-    let (pitch, profile, snippets) = match gathered {
+    let (product, profile, customer, snippets) = match gathered {
         Ok(Ok(v)) => v,
-        // A missing pitch (deleted mid-batch) surfaces here as a DB error → 500.
         Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -372,21 +410,30 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
     // Only content-bearing snippets are worth sending; drop the blank cards the
     // editor leaves behind. Each carries its conversation stage (`category`) so the
     // composer can prefer stage-appropriate lines for where the thread sits.
-    let draft_snippets: Vec<DraftSnippet> = snippets
-        .into_iter()
-        .filter(|s| !s.content.trim().is_empty())
-        .map(|s| DraftSnippet { stage: s.category, name: s.name, content: s.content })
-        .collect();
+    let draft_snippets: Vec<DraftSnippet> = fit_to_budget(
+        snippets
+            .into_iter()
+            .filter(|s| !s.content.trim().is_empty())
+            .map(|s| DraftSnippet { stage: s.category, name: s.name, content: s.content })
+            .collect(),
+    );
 
     // Nothing to compose from → don't burn a CLI call. Return the same shape of
     // ALL-CAPS refusal the model would, so the composer treatment is consistent.
-    let has_material = !pitch.skill.trim().is_empty()
+    // A customer profile alone isn't material: it says who to write to and toward
+    // what, but carries nothing you're allowed to actually say.
+    let has_material = !product.description.trim().is_empty()
         || !profile.who_are_you.trim().is_empty()
-        || !profile.what_building.trim().is_empty()
         || !draft_snippets.is_empty();
     if !has_material {
+        // `blocked` marks this as a setup problem rather than a composed reply, so
+        // the batch runner can stop and say so once instead of writing this
+        // sentence into every open composer. The sentinel text stays for a client
+        // that predates the flag (and for a single manual draft, where seeing it in
+        // the composer is the clearest possible answer).
         return Json(serde_json::json!({
-            "draft": "NO SNIPPETS OR PROFILE CONFIGURED YET — ADD MATERIAL IN COURLAND TO DRAFT A REPLY."
+            "draft": "NO SNIPPETS OR PROFILE CONFIGURED YET — ADD MATERIAL IN COURLAND TO DRAFT A REPLY.",
+            "blocked": true,
         }))
         .into_response();
     }
@@ -403,10 +450,15 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
 
     let ctx = DraftContext {
         prospect_name: body.prospect_name.trim(),
-        pitch_name: &pitch.name,
-        pitch_skill: &pitch.skill,
+        product_name: &product.name,
+        product_description: &product.description,
         profile_who: &profile.who_are_you,
-        profile_building: &profile.what_building,
+        customer: customer.as_ref().map(|c| DraftCustomer {
+            name: &c.name,
+            who_they_are: &c.who_they_are,
+            pain: &c.pain,
+            goal: &c.goal,
+        }),
         snippets: &draft_snippets,
         conversation: &conversation,
     };
@@ -501,6 +553,52 @@ async fn set_comment_run_status(
     }
 }
 
+/// Character ceiling on the snippet material in one draft prompt. Deliberately a
+/// size budget rather than a count: which snippets serve a given buyer is the
+/// model's job (see the caller), so the whole library goes through untouched in the
+/// normal case. This only exists so that a library large enough to blow the context
+/// window degrades into a slightly thinner prompt instead of a 60s CLI timeout
+/// reported as an installation problem. ~30k tokens, which leaves the conversation,
+/// profile and instructions comfortable room.
+const DRAFT_SNIPPET_BUDGET: usize = 120_000;
+
+/// Keep the snippet set under [`DRAFT_SNIPPET_BUDGET`], preserving conversation-arc
+/// coverage. Under budget — the overwhelmingly common case — the set is returned
+/// untouched. Over it, an evenly-spaced stride thins the set across the whole arc,
+/// so the model still sees openers through closers rather than losing the tail to a
+/// truncation. Trimming is logged: a silently shortened prompt would look like the
+/// model ignoring material the user can plainly see in their library.
+fn fit_to_budget(snippets: Vec<DraftSnippet>) -> Vec<DraftSnippet> {
+    let weigh = |s: &DraftSnippet| s.content.len() + s.name.len() + s.stage.len();
+    let total: usize = snippets.iter().map(weigh).sum();
+    if total <= DRAFT_SNIPPET_BUDGET {
+        return snippets;
+    }
+
+    let n = snippets.len();
+    let mut k = n;
+    let (picked, size) = loop {
+        // Evenly spaced over the arc; strictly increasing while k <= n.
+        let pick: Vec<usize> = (0..k).map(|i| i * n / k).collect();
+        let size: usize = pick.iter().map(|&i| weigh(&snippets[i])).sum();
+        if size <= DRAFT_SNIPPET_BUDGET || k == 1 {
+            break (pick, size);
+        }
+        // Proportional shrink, with a guaranteed decrement so this always converges.
+        let next = k.saturating_mul(DRAFT_SNIPPET_BUDGET) / size.max(1);
+        k = if next >= k { k - 1 } else { next.max(1) };
+    };
+
+    eprintln!(
+        "ingest: snippet library over the draft budget ({total} chars, {n} snippets) — \
+         sending an evenly-spaced {} ({size} chars)",
+        picked.len()
+    );
+
+    let mut src: Vec<Option<DraftSnippet>> = snippets.into_iter().map(Some).collect();
+    picked.iter().filter_map(|&i| src[i].take()).collect()
+}
+
 /// How many snippets to feed the commenter as voice samples. A handful of varied
 /// examples conveys the founder's style; more only adds tokens and tempts the model
 /// to lift wording, which the style-only rule forbids (a comment must never reuse a
@@ -508,10 +606,10 @@ async fn set_comment_run_status(
 const COMMENT_VOICE_CAP: usize = 12;
 
 /// Reduce the founder's approved snippet contents to a bounded voice/style corpus
-/// for the commenter: drop exact-duplicate lines (a snippet copied across the
-/// pitch/profile boundary — case/space-insensitive, keeping the first), then, if
-/// still over the cap, take an evenly-spaced stride across the set so the sample
-/// spreads over the whole library instead of clustering on the newest additions.
+/// for the commenter: drop duplicate lines (case/space-insensitive, keeping the
+/// first), then, if still over the cap, take an evenly-spaced stride across the set
+/// so the sample spreads over the whole library instead of clustering on the newest
+/// additions.
 fn sample_voice(contents: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let kept: Vec<String> = contents
@@ -546,9 +644,11 @@ struct CommentDraftIn {
 ///                later scrape can resurface it once the post has evolved.
 ///  - `created` — a new draft row (returned). The extension counts these toward
 ///                the placed-draft budget.
-/// The comment composes from the global profile (persona) and the founder's
-/// snippets used purely as a voice/style corpus (never their content, no pitch), so
-/// it reads as a peer who sounds like the founder, not pitch copy.
+/// The comment composes from the founder's profile and product as PERSONA (who is
+/// speaking, never something to promote) plus their snippets used purely as a
+/// voice/style corpus (never their content) — and, unlike a draft, no customer
+/// profile and no goal, so nothing steers it toward an outcome. It reads as a peer
+/// who sounds like the founder, not pitch copy.
 async fn create_comment_draft(
     State(state): State<ServerState>,
     Json(body): Json<CommentDraftIn>,
@@ -585,19 +685,21 @@ async fn create_comment_draft(
         return Json(serde_json::json!({ "result": "skipped" })).into_response();
     }
 
-    // Gather the profile persona plus the founder's approved snippets. The profile
-    // is the persona to write FROM; the snippets are a VOICE/STYLE corpus only — the
-    // model mimics how they're written, never reuses their content (no pitch leaks in).
+    // Gather the persona (who is speaking + what they work on) plus the founder's
+    // approved snippets. The profile and product are persona to write FROM; the
+    // snippets are a VOICE/STYLE corpus only — the model mimics how they're written,
+    // never reuses their content, so no sales material leaks into a public comment.
     let app = state.app.clone();
     let gathered = tokio::task::spawn_blocking(move || {
         let st = app.state::<AppState>();
         let conn = st.conn.lock().map_err(|e| e.to_string())?;
         let profile = profile::repository::get(&conn).map_err(|e| e.to_string())?;
+        let product = product::repository::get(&conn).map_err(|e| e.to_string())?;
         let snippets = snippets::repository::list_all_approved(&conn).map_err(|e| e.to_string())?;
-        Ok::<_, String>((profile, snippets))
+        Ok::<_, String>((profile, product, snippets))
     })
     .await;
-    let (profile, snippets) = match gathered {
+    let (profile, product, snippets) = match gathered {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -608,7 +710,8 @@ async fn create_comment_draft(
         author_name: body.author_name.trim(),
         post_text: body.post_text.trim(),
         profile_who: &profile.who_are_you,
-        profile_building: &profile.what_building,
+        product_name: &product.name,
+        product_description: &product.description,
         voice_samples: &voice_samples,
     };
     let comment = match ai::client::run_capped(Prompt::draft_comment(&ctx)).await {
@@ -1016,8 +1119,48 @@ async fn create_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_healed;
+    use super::{fit_to_budget, parse_healed, DraftSnippet, DRAFT_SNIPPET_BUDGET};
     use std::collections::HashSet;
+
+    fn snippet(name: &str, chars: usize) -> DraftSnippet {
+        DraftSnippet {
+            stage: "Opener".into(),
+            name: name.into(),
+            content: "x".repeat(chars),
+        }
+    }
+
+    #[test]
+    fn budget_leaves_a_normal_library_untouched() {
+        let library: Vec<DraftSnippet> =
+            (0..80).map(|i| snippet(&format!("s{i}"), 500)).collect();
+        let kept = fit_to_budget(library);
+        assert_eq!(kept.len(), 80, "a 40k-char library is well under budget");
+    }
+
+    #[test]
+    fn budget_thins_an_oversized_library_and_spans_the_whole_arc() {
+        // 400 × 1000 chars = 400k, comfortably over the budget.
+        let library: Vec<DraftSnippet> =
+            (0..400).map(|i| snippet(&format!("s{i:03}"), 1000)).collect();
+        let kept = fit_to_budget(library);
+
+        let size: usize = kept.iter().map(|s| s.content.len() + s.name.len() + s.stage.len()).sum();
+        assert!(size <= DRAFT_SNIPPET_BUDGET, "trimmed set must fit the budget, got {size}");
+        assert!(!kept.is_empty(), "must never trim to nothing");
+
+        // Evenly spaced, not truncated: the last snippet in the arc survives, and the
+        // sample reaches into the back half of the library.
+        assert_eq!(kept[0].name, "s000");
+        let last: usize = kept.last().unwrap().name[1..].parse().unwrap();
+        assert!(last > 200, "sample must span the arc, deepest kept was s{last:03}");
+    }
+
+    #[test]
+    fn budget_survives_a_single_snippet_larger_than_the_whole_budget() {
+        let kept = fit_to_budget(vec![snippet("huge", DRAFT_SNIPPET_BUDGET * 2)]);
+        assert_eq!(kept.len(), 1, "one over-budget snippet is still better than none");
+    }
 
     fn requested(keys: &[&str]) -> HashSet<String> {
         keys.iter().map(|s| s.to_string()).collect()

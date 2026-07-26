@@ -1,13 +1,12 @@
 use rusqlite::Row;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// A pipeline stage belonging to a pitch. `kind` is `"standard"` or
-/// `"messaging"`; a pipeline has exactly one messaging stage, always first.
+/// A stage of the one shared pipeline. `kind` is `"standard"` or `"messaging"`;
+/// the pipeline has exactly one messaging stage, always first.
 /// Output-only — returned by commands, never accepted as input.
 #[derive(Debug, Serialize)]
 pub struct Stage {
     pub id: i64,
-    pub pitch_id: i64,
     pub name: String,
     pub kind: String,
     pub position: i64,
@@ -22,7 +21,6 @@ impl Stage {
     pub(super) fn from_row(row: &Row) -> rusqlite::Result<Self> {
         Ok(Stage {
             id: row.get("id")?,
-            pitch_id: row.get("pitch_id")?,
             name: row.get("name")?,
             kind: row.get("kind")?,
             position: row.get("position")?,
@@ -62,119 +60,9 @@ pub(crate) fn color_for_position(position: i64) -> &'static str {
     STAGE_COLORS[position.rem_euclid(len) as usize]
 }
 
-/// A stage as supplied by the frontend when seeding a pitch's pipeline at
-/// creation. `position` is the array index; `validate_inputs` enforces ordering
-/// (exactly one messaging stage, first) and a valid color.
-#[derive(Debug, Deserialize)]
-pub struct StageInput {
-    pub name: String,
-    pub kind: String,
-    pub color: String,
-}
-
-/// Trim + validate a user-supplied pipeline: non-empty names, known kinds, and
-/// exactly one messaging stage that sits first. Returns the cleaned list. Owned
-/// by the stages feature since it enforces stage-domain invariants; callers
-/// (e.g. `create_pitch`) delegate here rather than re-implementing the rules.
-pub(crate) fn validate_inputs(input: Vec<StageInput>) -> Result<Vec<StageInput>, String> {
-    let mut cleaned = Vec::with_capacity(input.len());
-    let mut messaging_count = 0;
-    for (i, stage) in input.into_iter().enumerate() {
-        let name = stage.name.trim().to_string();
-        if name.is_empty() {
-            return Err("Stage names can't be empty.".into());
-        }
-        let kind = match stage.kind.as_str() {
-            KIND_MESSAGING => {
-                if i != 0 {
-                    return Err("The messaging stage must be first.".into());
-                }
-                messaging_count += 1;
-                KIND_MESSAGING
-            }
-            KIND_STANDARD => KIND_STANDARD,
-            other => return Err(format!("Unknown stage kind: {other}")),
-        };
-        if !is_valid_color(&stage.color) {
-            return Err(format!("Unknown stage color: {}", stage.color));
-        }
-        cleaned.push(StageInput {
-            name,
-            kind: kind.to_string(),
-            color: stage.color,
-        });
-    }
-    if messaging_count != 1 {
-        return Err("A pipeline needs exactly one messaging stage.".into());
-    }
-    Ok(cleaned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn stage(name: &str, kind: &str) -> StageInput {
-        StageInput {
-            name: name.into(),
-            kind: kind.into(),
-            color: "blue".into(),
-        }
-    }
-
-    #[test]
-    fn validates_and_trims_a_good_pipeline() {
-        let out = validate_inputs(vec![
-            stage("  Messaged ", KIND_MESSAGING),
-            stage("Meeting", KIND_STANDARD),
-        ])
-        .unwrap();
-        assert_eq!(out[0].name, "Messaged"); // trimmed
-        assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn rejects_empty_name() {
-        assert!(validate_inputs(vec![
-            stage("Messaged", KIND_MESSAGING),
-            stage("  ", KIND_STANDARD)
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_messaging_not_first() {
-        assert!(validate_inputs(vec![
-            stage("Meeting", KIND_STANDARD),
-            stage("Messaged", KIND_MESSAGING)
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_zero_or_multiple_messaging() {
-        assert!(validate_inputs(vec![stage("Meeting", KIND_STANDARD)]).is_err());
-        assert!(validate_inputs(vec![
-            stage("Messaged", KIND_MESSAGING),
-            stage("Second", KIND_MESSAGING),
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_kind() {
-        assert!(validate_inputs(vec![stage("Weird", "phone-call")]).is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_color() {
-        let bad = StageInput {
-            name: "Messaged".into(),
-            kind: KIND_MESSAGING.into(),
-            color: "chartreuse".into(),
-        };
-        assert!(validate_inputs(vec![bad]).is_err());
-    }
 
     #[test]
     fn color_for_position_rotates_and_wraps() {
@@ -185,10 +73,10 @@ mod tests {
 
     /// The TS palette (`STAGE_COLORS` in `src/api/stages.ts`) is a hand-kept
     /// mirror of this Rust source of truth — Rust and TS can't share the literal.
-    /// The create flow computes a new stage's color in TS, so a silent drift
-    /// would persist colors that disagree with the backend rotation. Pin them so
-    /// editing one list without the other fails here instead of shipping a
-    /// mismatch.
+    /// The stage editor picks a newly-added stage's color in TS by the same
+    /// rotation the backend applies on append, so a silent drift would show the
+    /// user one color and persist another. Pin them so editing one list without
+    /// the other fails here instead of shipping a mismatch.
     #[test]
     fn ts_stage_colors_mirror_the_rust_palette() {
         const TS: &str = include_str!("../../../../src/api/stages.ts");
@@ -219,6 +107,35 @@ mod tests {
         assert_eq!(colors.len(), STAGE_COLORS.len(), "one literal per palette slot");
         for (position, color) in colors.iter().enumerate() {
             assert_eq!(*color, color_for_position(position as i64));
+        }
+    }
+
+    /// Migration 0024 seeds the Full-cycle pipeline (colors written out by hand
+    /// in SQL) when there was no pitch to inherit one from. That's now the ONLY
+    /// place a pipeline is born, so its colors must still agree with the palette
+    /// rotation — otherwise a fresh install's board is colored differently from
+    /// every stage the user adds afterwards.
+    #[test]
+    fn migration_0024_template_colors_match_the_palette_rotation() {
+        const SQL: &str = include_str!("../../database/migrations/0024_one_pipeline.sql");
+        // The template is the SELECT/UNION block naming a color per position, in
+        // order. Take the seed statement and pull its quoted literals: each row
+        // contributes name, kind, then color.
+        let seed = SQL
+            .split("INSERT INTO stages_new (name, kind, position, color)")
+            .nth(1)
+            .expect("0024 seeds a template pipeline");
+        let block = seed.split(')').next().expect("the seed subquery is closed");
+        let literals: Vec<&str> = block.split('\'').skip(1).step_by(2).collect();
+        // name, kind, color per row — the color is every third literal.
+        let colors: Vec<&str> = literals.iter().skip(2).step_by(3).copied().collect();
+        assert!(!colors.is_empty(), "found the template's color literals");
+        for (position, color) in colors.iter().enumerate() {
+            assert_eq!(
+                *color,
+                color_for_position(position as i64),
+                "0024's seeded stage at position {position} must use the palette color"
+            );
         }
     }
 }
