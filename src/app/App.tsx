@@ -1,119 +1,68 @@
-import { useEffect, useState } from "react";
-import {
-  createPitch,
-  deletePitch,
-  listPitches,
-  updatePitch,
-  type Pitch,
-} from "../api/pitches";
-import type { StageInput } from "../api/stages";
-import LoadError from "../components/LoadError";
-import { errorMessage } from "../lib/errors";
-import CreatePitchView from "../pitches/CreatePitchView";
-import AppShell, { type TabId } from "./AppShell";
+import { useState } from "react";
+import Tabs, { type TabItem } from "../components/Tabs";
+import CommentsView from "../comments/CommentsView";
+import CustomersView from "../customers/CustomersView";
+import ProductView from "../product/ProductView";
+import ProfileView from "../profile/ProfileView";
+import ProspectsView from "../prospects/ProspectsView";
+import SnippetsView from "../snippets/SnippetsView";
+import styles from "./app.module.css";
 
-type Mode = "shell" | "create";
+type TabId =
+  | "product"
+  | "customers"
+  | "prospects"
+  | "snippets"
+  | "comments"
+  | "profile";
 
 /**
- * Top-level state: which pitch is the active context, which tab is showing,
- * and whether we're in the full-screen create flow. The dropdown selects the
- * active pitch; both tabs are views scoped to it.
+ * The four tabs of the sale, left to right: what you sell, who you sell it to,
+ * who you're working right now, and what you actually say. Comments and Profile
+ * are pushed to the far right — they're about you and your presence, not a deal.
+ */
+const LEFT_TABS: TabItem<TabId>[] = [
+  { id: "product", label: "Product" },
+  { id: "customers", label: "Customers" },
+  { id: "prospects", label: "Prospects" },
+  { id: "snippets", label: "Snippets" },
+];
+
+const RIGHT_TABS: TabItem<TabId>[] = [
+  { id: "comments", label: "Comments" },
+  { id: "profile", label: "Profile" },
+];
+
+/**
+ * The app surface: navbar and the content of the active tab.
+ *
+ * Nothing here is scoped any more. There is one product, one pipeline, and one
+ * snippet library, so the old active-pitch context (a switcher in the navbar,
+ * threaded into every view) has no reason to exist — the only state left is
+ * which tab is showing, and each view loads its own data.
  */
 export default function App() {
-  const [pitches, setPitches] = useState<Pitch[]>([]);
-  const [activePitchId, setActivePitchId] = useState<number | null>(null);
-  const [activeTab, setActiveTab] = useState<TabId>("pitch");
-  const [mode, setMode] = useState<Mode>("shell");
-  const [loadError, setLoadError] = useState<string | null>(null);
-  // Bumped by the retry button to re-run the load effect after a failure.
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    // `active` short-circuits a resolve after unmount (incl. StrictMode's
-    // double-mount) and pairs with the `.catch` so a failed load can't become
-    // an unhandled rejection.
-    let active = true;
-    setLoadError(null);
-    listPitches()
-      .then((loaded) => {
-        if (!active) return;
-        // Only seed when state is still pristine, so a slow load can never
-        // clobber a pitch the user created while it was in flight. In practice
-        // the local-SQLite list resolves at startup before any create, so this
-        // is defense-in-depth rather than a reachable race.
-        setPitches((prev) => (prev.length > 0 ? prev : loaded));
-        setActivePitchId((prev) => prev ?? loaded[0]?.id ?? null);
-      })
-      // A failed load surfaces a recoverable error screen (with retry) instead
-      // of silently leaving an empty shell that looks like a fresh, blank DB.
-      .catch((e) => {
-        if (active) setLoadError(errorMessage(e));
-      });
-    return () => {
-      active = false;
-    };
-  }, [reloadKey]);
-
-  const activePitch = pitches.find((p) => p.id === activePitchId) ?? null;
-
-  async function handleCreate(
-    name: string,
-    skill: string,
-    stages: StageInput[],
-  ) {
-    const created = await createPitch(name, skill, stages);
-    setPitches((prev) => [created, ...prev]);
-    setActivePitchId(created.id);
-    setActiveTab("pitch");
-    setMode("shell");
-  }
-
-  async function handleUpdate(id: number, name: string, skill: string) {
-    const updated = await updatePitch(id, name, skill);
-    setPitches((prev) => prev.map((p) => (p.id === id ? updated : p)));
-  }
-
-  async function handleDelete(id: number) {
-    await deletePitch(id);
-    // Functional update so a pitch created during the await (via the switcher's
-    // create flow) isn't clobbered. `remaining` from the render closure is only
-    // read to reselect when the deleted pitch was still active — a state any
-    // concurrent create would have moved us off of — so it's accurate there.
-    const remaining = pitches.filter((p) => p.id !== id);
-    setPitches((prev) => prev.filter((p) => p.id !== id));
-    setActivePitchId((cur) => (cur === id ? (remaining[0]?.id ?? null) : cur));
-    setActiveTab("pitch");
-  }
-
-  if (loadError) {
-    return (
-      <LoadError
-        what="your pitches"
-        detail={loadError}
-        onRetry={() => setReloadKey((k) => k + 1)}
-      />
-    );
-  }
-
-  if (mode === "create") {
-    return (
-      <CreatePitchView
-        onCreate={handleCreate}
-        onCancel={() => setMode("shell")}
-      />
-    );
-  }
+  // Prospects is the daily driver — the board you come back to.
+  const [activeTab, setActiveTab] = useState<TabId>("prospects");
 
   return (
-    <AppShell
-      pitches={pitches}
-      activePitch={activePitch}
-      activeTab={activeTab}
-      onSelectPitch={setActivePitchId}
-      onChangeTab={setActiveTab}
-      onCreateNew={() => setMode("create")}
-      onSavePitch={handleUpdate}
-      onDeletePitch={handleDelete}
-    />
+    <div className={styles.app}>
+      <header className={styles.navbar}>
+        <div className={styles.navInner}>
+          <Tabs items={LEFT_TABS} active={activeTab} onChange={setActiveTab} />
+          <span className={styles.navSpacer} aria-hidden="true" />
+          <Tabs items={RIGHT_TABS} active={activeTab} onChange={setActiveTab} />
+        </div>
+      </header>
+
+      <main className={styles.content}>
+        {activeTab === "product" && <ProductView />}
+        {activeTab === "customers" && <CustomersView />}
+        {activeTab === "prospects" && <ProspectsView />}
+        {activeTab === "snippets" && <SnippetsView />}
+        {activeTab === "comments" && <CommentsView />}
+        {activeTab === "profile" && <ProfileView />}
+      </main>
+    </div>
   );
 }

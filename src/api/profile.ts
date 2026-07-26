@@ -1,12 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** The user's global profile context — "skills" the AI reasons about. A single
- *  app-wide record, not tied to any pitch. */
+/** Who the *user* is — background, role, voice. A single app-wide record.
+ *
+ *  Deliberately narrow: the product story lives in {@link ./product}. The person
+ *  writing and the thing being sold are different jobs, and keeping them apart is
+ *  what lets a public comment borrow the founder's persona without reading as
+ *  pitch copy. */
 export interface Profile {
-  /** Who the user is — background, role, voice. */
   who_are_you: string;
-  /** What the user is building — the product, its shape and audience. */
-  what_building: string;
   updated_at: string;
 }
 
@@ -17,23 +18,12 @@ export function getProfile(): Promise<Profile> {
   return invoke("get_profile");
 }
 
-export function updateProfile(
-  whoAreYou: string,
-  whatBuilding: string,
-): Promise<Profile> {
-  return invoke("update_profile", {
-    whoAreYou,
-    whatBuilding,
-  });
+export function updateProfile(whoAreYou: string): Promise<Profile> {
+  return invoke("update_profile", { whoAreYou });
 }
 
 /** Polish the "who are you" context via the local Claude Code CLI. Doesn't
  *  persist — the caller drops the result into the editor. */
 export function polishWho(text: string): Promise<string> {
   return invoke("polish_who", { text });
-}
-
-/** Polish the "what are you building" context. See {@link polishWho}. */
-export function polishBuilding(text: string): Promise<string> {
-  return invoke("polish_building", { text });
 }

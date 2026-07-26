@@ -1,11 +1,17 @@
 import { useState } from "react";
+import type { Customer } from "../api/customers";
 import type { Prospect } from "../api/prospects";
 import type { Stage } from "../api/stages";
 import type { ProspectViewProps } from "./ProspectsView";
 import { stageAccentStyle } from "../lib/stageColor";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
-import { MessageCount, AwaitingReplyBadge, StageMenu } from "./ProspectControls";
+import {
+  MessageCount,
+  AwaitingReplyBadge,
+  CustomerMenu,
+  StageMenu,
+} from "./ProspectControls";
 import styles from "./PipelineBoard.module.css";
 
 /** Kanban board: one column per stage, cards dragged between columns to move a
@@ -15,10 +21,12 @@ import styles from "./PipelineBoard.module.css";
 export default function PipelineBoard({
   prospects,
   stages,
+  customers,
   messagingStageId,
   busyIds,
   onOpen,
   onMove,
+  onSetCustomer,
   onDelete,
 }: ProspectViewProps) {
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -85,6 +93,7 @@ export default function PipelineBoard({
                   key={p.id}
                   prospect={p}
                   stages={stages}
+                  customers={customers}
                   currentStageId={columnOf(p)}
                   showCount={isMessaging}
                   busy={busyIds.has(p.id)}
@@ -93,6 +102,7 @@ export default function PipelineBoard({
                   onDragEnd={endDrag}
                   onOpen={onOpen}
                   onMove={onMove}
+                  onSetCustomer={onSetCustomer}
                   onDelete={onDelete}
                 />
               ))}
@@ -112,6 +122,7 @@ export default function PipelineBoard({
 function ProspectCard({
   prospect: p,
   stages,
+  customers,
   currentStageId,
   showCount,
   busy,
@@ -120,10 +131,12 @@ function ProspectCard({
   onDragEnd,
   onOpen,
   onMove,
+  onSetCustomer,
   onDelete,
 }: {
   prospect: Prospect;
   stages: Stage[];
+  customers: Customer[];
   currentStageId: number | null;
   showCount: boolean;
   busy: boolean;
@@ -132,6 +145,7 @@ function ProspectCard({
   onDragEnd: () => void;
   onOpen: (url: string) => void;
   onMove: (id: number, stageId: number) => void;
+  onSetCustomer: (id: number, customerId: number | null) => void;
   onDelete: (id: number) => Promise<void>;
 }) {
   return (
@@ -166,12 +180,23 @@ function ProspectCard({
             {p.awaiting_reply && <AwaitingReplyBadge />}
           </div>
         )}
-        <StageMenu
-          stages={stages}
-          currentStageId={currentStageId}
-          onMove={(stageId) => onMove(p.id, stageId)}
-          busy={busy}
-        />
+        {/* Which profile steers their drafts, then where they sit — kept
+            together so the foot's space-between doesn't fling them to opposite
+            edges of a narrow card. */}
+        <div className={styles.cardMenus}>
+          <CustomerMenu
+            customers={customers}
+            currentCustomerId={p.customer_id}
+            onSet={(customerId) => onSetCustomer(p.id, customerId)}
+            busy={busy}
+          />
+          <StageMenu
+            stages={stages}
+            currentStageId={currentStageId}
+            onMove={(stageId) => onMove(p.id, stageId)}
+            busy={busy}
+          />
+        </div>
       </div>
     </article>
   );

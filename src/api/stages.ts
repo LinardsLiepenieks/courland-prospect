@@ -32,36 +32,28 @@ export const STAGE_COLORS: StageColor[] = [
   "gray",
 ];
 
-/** A pipeline stage belonging to a pitch — one step of its funnel. */
+/** A stage of the one shared pipeline — one step of the funnel every prospect
+ *  moves through, whichever customer profile they match. */
 export interface Stage {
   id: number;
-  pitch_id: number;
   name: string;
-  kind: StageKind;
-  /** 0-based order within the pitch's pipeline. */
+  /** 0-based order within the pipeline. */
   position: number;
+  kind: StageKind;
   color: StageColor;
   created_at: string;
 }
 
-/** A stage as sent to the backend when seeding a pipeline at pitch creation.
- *  Order in the array is the stage order; the backend validates that exactly
- *  one messaging stage exists and sits first, and that the color is known. */
-export interface StageInput {
-  name: string;
-  kind: StageKind;
-  color: StageColor;
-}
-
 // Typed wrappers over the Rust stage commands. All SQL lives in the backend.
+// There is one pipeline, so none of these take an owner.
 
-export function listStages(pitchId: number): Promise<Stage[]> {
-  return invoke("list_stages", { pitchId });
+export function listStages(): Promise<Stage[]> {
+  return invoke("list_stages");
 }
 
-/** Append a new standard stage to the end of a pitch's pipeline. */
-export function createStage(pitchId: number, name: string): Promise<Stage> {
-  return invoke("create_stage", { pitchId, name });
+/** Append a new standard stage to the end of the pipeline. */
+export function createStage(name: string): Promise<Stage> {
+  return invoke("create_stage", { name });
 }
 
 export function renameStage(id: number, name: string): Promise<Stage> {
@@ -79,20 +71,15 @@ export function deleteStage(id: number): Promise<void> {
   return invoke("delete_stage", { id });
 }
 
-/** Persist a new stage order. `orderedIds` must be exactly the pitch's stages
+/** Persist a new stage order. `orderedIds` must be exactly the pipeline's stages
  *  with the messaging stage first. Returns the reordered list. */
-export function reorderStages(
-  pitchId: number,
-  orderedIds: number[],
-): Promise<Stage[]> {
-  return invoke("reorder_stages", { pitchId, orderedIds });
+export function reorderStages(orderedIds: number[]): Promise<Stage[]> {
+  return invoke("reorder_stages", { orderedIds });
 }
 
 /** Subscribe to backend "stages changed" pushes — fired whenever a stage is
- *  created, renamed, recolored, reordered, or deleted. Lets a view editing the
- *  pipeline in one place (Settings) and a view rendering it in another (the
- *  Prospects board) stay in sync; a delete also reassigns prospects, so
- *  listeners should re-fetch prospects too. */
+ *  created, renamed, recolored, reordered, or deleted. A delete also reassigns
+ *  prospects, so listeners should re-fetch prospects too. */
 export function onStagesChanged(cb: () => void): Promise<UnlistenFn> {
   return listen("stages://changed", () => cb());
 }

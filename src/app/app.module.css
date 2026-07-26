@@ -1,5 +1,9 @@
 .app {
   min-height: 100%;
+  /* The pipeline breaks out of the content column to the window edges (see
+     ProspectsView `.wrapWide`). `clip` — not `hidden` — so no scroll container is
+     created and the sticky navbar keeps sticking to the viewport. */
+  overflow-x: clip;
 }
 
 /* ── Navbar ──────────────────────────────────────────────── */
@@ -12,32 +16,28 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* Switcher, a divider, then the tabs — all on one row. */
+/* The sale's tabs, then the personal ones — one row. App chrome spans the whole
+   window, so its edges line up with the full-bleed pipeline board below. */
 .navInner {
   display: flex;
   align-items: center;
   gap: 14px;
-  max-width: min(1080px, 90vw);
-  margin: 0 auto;
-  padding: 12px 12px;
+  /* 16px + the tab's own 12px inset puts the first label on the same 28px line
+     as every page title below it. */
+  padding: 12px 16px;
 }
 
-/* Separates the pitch-context selector from the view tabs. */
-.navDivider {
-  flex-shrink: 0;
-  width: 1px;
-  height: 22px;
-  background: var(--border);
-}
-
-/* Pushes the global Profile tab to the far right of the nav row. */
+/* Pushes Comments + Profile to the far right of the nav row. */
 .navSpacer {
   flex: 1;
 }
 
 /* ── Content ─────────────────────────────────────────────── */
+/* A centered reading column for the text-shaped views. The gutter is a fixed
+   width rather than a share of the viewport — a percentage gutter takes more away
+   the wider the window gets, which is backwards. */
 .content {
-  max-width: min(1080px, 90vw);
+  max-width: 1080px;
   margin: 0 auto;
-  padding: 32px 12px 96px;
+  padding: 32px 28px 96px;
 }

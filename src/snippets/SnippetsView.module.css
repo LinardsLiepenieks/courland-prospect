@@ -1,3 +1,33 @@
+/* ── Page ────────────────────────────────────────────────── */
+.page {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+.intro {
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin-top: 6px;
+  max-width: 66ch;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page {
+    animation: none;
+  }
+}
+
+/* ── The library ─────────────────────────────────────────── */
 .snippets {
   display: flex;
   flex-direction: column;
@@ -288,56 +318,6 @@
 
 .menuBtn:disabled {
   opacity: 0.5;
-}
-
-/* ── Menu label / divider / empty (inside the Popover) ───── */
-.menuLabel {
-  padding: 5px 10px 3px;
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.menuEmpty {
-  padding: 3px 10px 6px;
-  color: var(--text-faint);
-  font-size: 12.5px;
-}
-
-.menuDivider {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--border);
-}
-
-/* ── Transient action flash ("Copied to X") ──────────────── */
-.flash {
-  flex-shrink: 0;
-  overflow: hidden;
-  max-width: 55%;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 550;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  animation: flashIn 160ms var(--ease-out) both;
-}
-
-.flash[data-kind="err"] {
-  color: var(--danger);
-}
-
-@keyframes flashIn {
-  from {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
 
 .confirm {
@@ -791,8 +771,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .card,
-  .proposed,
-  .flash {
+  .proposed {
     animation: none;
   }
   .card {

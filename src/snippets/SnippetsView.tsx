@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   approveSnippet,
-  copySnippet,
   createSnippet,
   deleteSnippet,
   listSnippets,
@@ -11,27 +17,18 @@ import {
   updateSnippet,
   type Snippet,
 } from "../api/snippets";
-import { listPitches, type Pitch } from "../api/pitches";
 import { errorMessage } from "../lib/errors";
 import { useAsyncAction } from "../lib/useAsyncAction";
 import { useAutosave } from "../lib/useAutosave";
-import { MenuItem, Popover } from "./Popover";
-import LoadError from "./LoadError";
-import SavedIndicator from "./SavedIndicator";
-import styles from "./SnippetsSection.module.css";
-
-interface Props {
-  /** The scope: a pitch id for that pitch's snippets, or `null` for the global
-   *  profile snippets. */
-  pitchId: number | null;
-}
-
-/** A destination the "Copy to…" menu can send a snippet to. `id` is a pitch id, or
- *  `null` for the global profile. */
-interface CopyTarget {
-  id: number | null;
-  name: string;
-}
+import {
+  MenuDivider,
+  MenuItem,
+  MenuNote,
+  Popover,
+} from "../components/Popover";
+import LoadError from "../components/LoadError";
+import SavedIndicator from "../components/SavedIndicator";
+import styles from "./SnippetsView.module.css";
 
 /** One conversation-stage section: the category label and the snippets in it. */
 interface StageGroup {
@@ -69,19 +66,23 @@ function groupByStage(approved: Snippet[]): StageGroup[] {
 }
 
 /**
- * The Snippets editor, reused in both the Profile tab (`pitchId={null}`) and a
- * pitch's Settings tab (`pitchId={pitch.id}`). Proposed (AI-suggested) snippets
- * sit on top as an amber triage queue; approved snippets below are a flat list of
- * collapsibles — the name is always visible, and opening one reveals the editable
- * content. Each row's context menu (right-click, or the ⋯ button) copies the
- * snippet into another pitch (or the profile) as an independent duplicate, or
- * deletes it.
+ * The Snippets tab — the one library every draft composes from, shared by every
+ * customer profile. Proposed (AI-suggested) snippets sit on top as an amber
+ * triage queue; approved snippets below are grouped into conversation-stage
+ * sections you open on demand. Each row's context menu (right-click, or the ⋯
+ * button) deletes it.
  *
- * Keyed by `pitchId` where it's used so switching scope remounts with fresh state.
+ * Sections group by *when in a thread* a line belongs, never by whom it's for:
+ * which snippets suit a given buyer is decided per draft, from that customer
+ * profile's pain and goal.
+ *
+ * The library used to live inside a pitch's settings and again under Profile,
+ * split into scopes. With a single product there's a single body of material, so
+ * it gets a page of its own — and the page is this component rather than a
+ * wrapper around it, since there was never a second consumer to justify a split.
  */
-export default function SnippetsSection({ pitchId }: Props) {
+export default function SnippetsView() {
   const [snippets, setSnippets] = useState<Snippet[] | null>(null);
-  const [pitches, setPitches] = useState<Pitch[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped by the retry button to re-run the load after a failure.
   const [reloadKey, setReloadKey] = useState(0);
@@ -133,52 +134,32 @@ export default function SnippetsSection({ pitchId }: Props) {
   // post-mutation reload, and the initial load can't clobber one another out of
   // order. `loud` surfaces a failure as the retryable error screen; a background
   // refresh stays silent (whatever's on screen is still valid).
-  const loadSnippets = useCallback(
-    (loud = false) => {
-      const seq = ++fetchSeq.current;
-      if (loud) setLoadError(null);
-      listSnippets(pitchId)
-        .then((s) => {
-          if (mountedRef.current && seq === fetchSeq.current) setSnippets(s);
-        })
-        .catch((e) => {
-          if (mountedRef.current && seq === fetchSeq.current && loud)
-            setLoadError(errorMessage(e));
-        });
-    },
-    [pitchId],
-  );
+  const loadSnippets = useCallback((loud = false) => {
+    const seq = ++fetchSeq.current;
+    if (loud) setLoadError(null);
+    listSnippets()
+      .then((s) => {
+        if (mountedRef.current && seq === fetchSeq.current) setSnippets(s);
+      })
+      .catch((e) => {
+        if (mountedRef.current && seq === fetchSeq.current && loud)
+          setLoadError(errorMessage(e));
+      });
+  }, []);
 
   // Initial load (and retry via `reloadKey`).
   useEffect(() => {
     loadSnippets(true);
   }, [loadSnippets, reloadKey]);
 
-  // The pitch list backs the "Copy to…" menu's targets. A failure here isn't fatal —
-  // the menu just offers fewer destinations — so it's fetched separately and stays
-  // silent on error (never blocks the snippet editor).
+  // Live-refresh when a background pass changes the library — a new proposal, or a
+  // classify pass updating a snippet's position/category. The reload goes through
+  // `loadSnippets`, so it can't clobber (or be clobbered by) a concurrent user
+  // action.
   useEffect(() => {
     let active = true;
-    listPitches()
-      .then((p) => {
-        if (active) setPitches(p);
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  // Live-refresh when a background pass changes THIS scope's snippets — a new
-  // proposal, a classify pass updating a snippet's position/category, or a copy
-  // landing in this scope. The event payload is the affected scope (a pitch id, or
-  // `null` for the profile), so both scopes subscribe and match on equality. The
-  // reload goes through `loadSnippets`, so it can't clobber (or be clobbered by) a
-  // concurrent user action.
-  useEffect(() => {
-    let active = true;
-    const unlisten = onSnippetsChanged((changedScope) => {
-      if (active && changedScope === pitchId) loadSnippets();
+    const unlisten = onSnippetsChanged(() => {
+      if (active) loadSnippets();
     });
     return () => {
       active = false;
@@ -187,7 +168,7 @@ export default function SnippetsSection({ pitchId }: Props) {
       // rejection.
       void unlisten.then((fn) => fn()).catch(() => {});
     };
-  }, [pitchId, loadSnippets]);
+  }, [loadSnippets]);
 
   // After a re-score lands its reorganized list, open every stage section so nothing
   // hides. Cards re-home across sections during a re-score and sections are collapsed by
@@ -205,7 +186,7 @@ export default function SnippetsSection({ pitchId }: Props) {
 
   function handleAdd() {
     run(async () => {
-      const created = await createSnippet(pitchId);
+      const created = await createSnippet();
       // Mark it active so its section stays shown even after the classify pass
       // re-homes it out of Uncategorized — otherwise, with sections closed by
       // default, the card you're meant to type into would vanish mid-edit.
@@ -245,15 +226,7 @@ export default function SnippetsSection({ pitchId }: Props) {
     loadSnippets();
   }
 
-  // Copy owns its API call and returns nothing to the list: the source is untouched
-  // (an independent duplicate is created in the target scope), so this scope's view
-  // doesn't change. The target scope's open editor, if any, refreshes off the
-  // backend's `snippets://changed` event.
-  async function handleCopy(id: number, targetId: number | null) {
-    await copySnippet(id, targetId);
-  }
-
-  // Re-score + re-categorize the whole scope. Resolves once the batch finishes (the
+  // Re-score + re-categorize the whole library. Resolves once the batch finishes (the
   // backend emits `snippets://changed` once at the end for any OTHER open editor; this
   // window reloads itself here). The reload runs in a `finally` so a batch that applied
   // some rows and then errored still shows the DB's real state, not a stale list — and
@@ -264,7 +237,7 @@ export default function SnippetsSection({ pitchId }: Props) {
     setReclassifyNote(null);
     runReclassify(async () => {
       try {
-        const changed = await reclassifySnippets(pitchId);
+        const changed = await reclassifySnippets();
         setReclassifyNote(
           changed > 0
             ? `Re-scored ${changed} snippet${changed === 1 ? "" : "s"}.`
@@ -291,8 +264,8 @@ export default function SnippetsSection({ pitchId }: Props) {
     });
   }
 
-  // The scope's distinct categories (for the chip typeahead), derived from approved
-  // snippets. Must run before the early returns.
+  // The library's distinct categories (for the chip typeahead), derived from
+  // approved snippets. Must run before the early returns.
   const categories = useMemo(() => {
     const set = new Set<string>();
     for (const s of snippets ?? []) {
@@ -301,44 +274,25 @@ export default function SnippetsSection({ pitchId }: Props) {
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [snippets]);
 
-  // Where a snippet can be copied to: every scope except its own. From a pitch you
-  // can copy to the profile or any other pitch; from the profile, to any pitch.
-  const copyTargets = useMemo<CopyTarget[]>(() => {
-    const candidates = pitches.filter((p) => p.id !== pitchId);
-    // Pitch names aren't unique, so count them: a name shared by two pitches gets a
-    // disambiguator (its skill, or `#id` as a last resort) so the destination is
-    // never ambiguous.
-    const nameCounts = new Map<string, number>();
-    for (const p of candidates)
-      nameCounts.set(p.name, (nameCounts.get(p.name) ?? 0) + 1);
-
-    const targets: CopyTarget[] = [];
-    if (pitchId !== null) targets.push({ id: null, name: "Profile" });
-    for (const p of candidates) {
-      const ambiguous = (nameCounts.get(p.name) ?? 0) > 1;
-      const suffix = ambiguous
-        ? p.skill.trim()
-          ? ` · ${p.skill.trim()}`
-          : ` · #${p.id}`
-        : "";
-      targets.push({ id: p.id, name: `${p.name}${suffix}` });
-    }
-    return targets;
-  }, [pitches, pitchId]);
-
   if (loadError) {
     return (
-      <LoadError
-        what="snippets"
-        detail={loadError}
-        onRetry={() => setReloadKey((k) => k + 1)}
-      />
+      <Page>
+        <LoadError
+          what="snippets"
+          detail={loadError}
+          onRetry={() => setReloadKey((k) => k + 1)}
+        />
+      </Page>
     );
   }
   if (!snippets) {
     // Local SQLite resolves near-instantly; reserve space so the layout doesn't
     // jump when it lands.
-    return <div className={styles.loading} aria-busy="true" aria-hidden="true" />;
+    return (
+      <Page>
+        <div className={styles.loading} aria-busy="true" aria-hidden="true" />
+      </Page>
+    );
   }
 
   // Proposed snippets are a triage queue — always on top. Approved snippets are the
@@ -347,194 +301,225 @@ export default function SnippetsSection({ pitchId }: Props) {
   const approved = snippets.filter((s) => s.status === "approved");
 
   return (
-    <div className={styles.snippets}>
-      <button
-        type="button"
-        className={styles.addBtn}
-        onClick={handleAdd}
-        disabled={adding}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            d="M12 5v14M5 12h14"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          />
-        </svg>
-        Add snippet
-      </button>
+    <Page>
+      <div className={styles.snippets}>
+        <button
+          type="button"
+          className={styles.addBtn}
+          onClick={handleAdd}
+          disabled={adding}
+        >
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M12 5v14M5 12h14"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            />
+          </svg>
+          Add snippet
+        </button>
 
-      {approved.length >= 2 && (
-        <div className={styles.toolbar}>
-          {confirmingReclassify ? (
-            <div className={styles.rescoreConfirm}>
-              <span className={styles.rescoreWarn}>
-                Re-score all {approved.length}? This overwrites categories you set by hand.
-              </span>
-              <button
-                type="button"
-                className={styles.secondaryBtn}
-                onClick={() => setConfirmingReclassify(false)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className={styles.rescoreGoBtn}
-                onClick={handleReclassify}
-              >
-                Re-score
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className={styles.rescoreBtn}
-              onClick={() => setConfirmingReclassify(true)}
-              disabled={reclassifying || adding}
-            >
-              {reclassifying ? (
-                <>
-                  <span className={styles.spinner} aria-hidden="true" />
-                  Re-scoring…
-                </>
-              ) : (
-                <>
-                  <SparkIcon />
-                  Re-score &amp; re-categorize
-                </>
-              )}
-            </button>
-          )}
-        </div>
-      )}
-
-      {error && <div className={styles.error}>{error}</div>}
-      {reclassifyError && <div className={styles.error}>{reclassifyError}</div>}
-      {reclassifyNote && !reclassifying && (
-        <div className={styles.rescoreNote} role="status">
-          {reclassifyNote}
-        </div>
-      )}
-
-      {snippets.length === 0 ? (
-        <p className={styles.empty}>
-          No snippets yet. Add one to start building a library.
-        </p>
-      ) : (
-        <ul className={styles.list}>
-          {proposed.map((s) => (
-            <li key={s.id}>
-              <ProposedCard
-                snippet={s}
-                onApprove={handleApprove}
-                onReject={handleDelete}
-              />
-            </li>
-          ))}
-
-          {groupByStage(approved).flatMap((group, i) => {
-            // Open if the user opened it, or if it holds the card being worked in —
-            // the latter keeps an active card visible through a background re-stage,
-            // in the same render, so it never flashes hidden or loses focus.
-            const collapsed =
-              !openStages.has(group.category) &&
-              !group.items.some((s) => s.id === activeSnippetId);
-            const uncategorized = group.category === "";
-            // Ties each card back to its stage header for screen readers: the header
-            // and cards are flat siblings (so a re-stage moves a card without a remount),
-            // so the grouping is only visual unless the cards point at the header.
-            const headerId = `${sectionIdBase}-sec-${i}`;
-            return [
-              <li
-                // `cat:` namespaces real stages so the empty-category sentinel can't
-                // collide with a stage a user literally named "uncategorized".
-                key={uncategorized ? "stage-uncategorized" : `cat:${group.category}`}
-                className={styles.sectionRow}
-              >
+        {approved.length >= 2 && (
+          <div className={styles.toolbar}>
+            {confirmingReclassify ? (
+              <div className={styles.rescoreConfirm}>
+                <span className={styles.rescoreWarn}>
+                  Re-score all {approved.length}? This overwrites categories you
+                  set by hand.
+                </span>
                 <button
                   type="button"
-                  id={headerId}
-                  className={styles.sectionToggle}
-                  onClick={() => setStageOpen(group.category, collapsed)}
-                  aria-expanded={!collapsed}
+                  className={styles.secondaryBtn}
+                  onClick={() => setConfirmingReclassify(false)}
                 >
-                  <span className={styles.sectionChevron} data-expanded={!collapsed}>
-                    <Chevron />
-                  </span>
-                  <span
-                    className={styles.sectionName}
-                    data-uncat={uncategorized || undefined}
-                  >
-                    {uncategorized ? "Uncategorized" : group.category}
-                  </span>
-                  <span className={styles.sectionCount}>{group.items.length}</span>
+                  Cancel
                 </button>
-              </li>,
-              // Cards stay siblings in this one <ul>, keyed by id — so a background
-              // re-stage moves a card between sections in place instead of remounting
-              // it. Collapsing hides the run via `hidden` (no unmount, no lost edits).
-              // `role=group` + `aria-labelledby` restore the stage association a screen
-              // reader would otherwise lose (the collapsed card carries no stage text).
-              ...group.items.map((s) => (
-                <li
-                  key={s.id}
-                  hidden={collapsed}
-                  role="group"
-                  aria-labelledby={headerId}
+                <button
+                  type="button"
+                  className={styles.rescoreGoBtn}
+                  onClick={handleReclassify}
                 >
-                  <SnippetCard
-                    snippet={s}
-                    categories={categories}
-                    copyTargets={copyTargets}
-                    onDelete={handleDelete}
-                    onSetCategory={handleSetCategory}
-                    onCopy={handleCopy}
-                    onActivity={setActiveSnippetId}
-                  />
-                </li>
-              )),
-            ];
-          })}
-        </ul>
-      )}
+                  Re-score
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.rescoreBtn}
+                onClick={() => setConfirmingReclassify(true)}
+                disabled={reclassifying || adding}
+              >
+                {reclassifying ? (
+                  <>
+                    <span className={styles.spinner} aria-hidden="true" />
+                    Re-scoring…
+                  </>
+                ) : (
+                  <>
+                    <SparkIcon />
+                    Re-score &amp; re-categorize
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )}
 
-      <p className={styles.hint}>
-        Wrap a blank in [brackets] — like <span className={styles.hintTag}>[first name]</span> or{" "}
-        <span className={styles.hintTag}>[what they mentioned]</span> — and the AI fills it from the
-        prospect and the conversation when drafting.
-      </p>
-    </div>
+        {error && <div className={styles.error}>{error}</div>}
+        {reclassifyError && (
+          <div className={styles.error}>{reclassifyError}</div>
+        )}
+        {reclassifyNote && !reclassifying && (
+          <div className={styles.rescoreNote} role="status">
+            {reclassifyNote}
+          </div>
+        )}
+
+        {snippets.length === 0 ? (
+          <p className={styles.empty}>
+            No snippets yet. Add one to start building a library.
+          </p>
+        ) : (
+          <ul className={styles.list}>
+            {proposed.map((s) => (
+              <li key={s.id}>
+                <ProposedCard
+                  snippet={s}
+                  onApprove={handleApprove}
+                  onReject={handleDelete}
+                />
+              </li>
+            ))}
+
+            {groupByStage(approved).flatMap((group, i) => {
+              // Open if the user opened it, or if it holds the card being worked in —
+              // the latter keeps an active card visible through a background re-stage,
+              // in the same render, so it never flashes hidden or loses focus.
+              const collapsed =
+                !openStages.has(group.category) &&
+                !group.items.some((s) => s.id === activeSnippetId);
+              const uncategorized = group.category === "";
+              // Ties each card back to its stage header for screen readers: the header
+              // and cards are flat siblings (so a re-stage moves a card without a remount),
+              // so the grouping is only visual unless the cards point at the header.
+              const headerId = `${sectionIdBase}-sec-${i}`;
+              return [
+                <li
+                  // `cat:` namespaces real stages so the empty-category sentinel can't
+                  // collide with a stage a user literally named "uncategorized".
+                  key={
+                    uncategorized
+                      ? "stage-uncategorized"
+                      : `cat:${group.category}`
+                  }
+                  className={styles.sectionRow}
+                >
+                  <button
+                    type="button"
+                    id={headerId}
+                    className={styles.sectionToggle}
+                    onClick={() => setStageOpen(group.category, collapsed)}
+                    aria-expanded={!collapsed}
+                  >
+                    <span
+                      className={styles.sectionChevron}
+                      data-expanded={!collapsed}
+                    >
+                      <Chevron />
+                    </span>
+                    <span
+                      className={styles.sectionName}
+                      data-uncat={uncategorized || undefined}
+                    >
+                      {uncategorized ? "Uncategorized" : group.category}
+                    </span>
+                    <span className={styles.sectionCount}>
+                      {group.items.length}
+                    </span>
+                  </button>
+                </li>,
+                // Cards stay siblings in this one <ul>, keyed by id — so a background
+                // re-stage moves a card between sections in place instead of remounting
+                // it. Collapsing hides the run via `hidden` (no unmount, no lost edits).
+                // `role=group` + `aria-labelledby` restore the stage association a screen
+                // reader would otherwise lose (the collapsed card carries no stage text).
+                ...group.items.map((s) => (
+                  <li
+                    key={s.id}
+                    hidden={collapsed}
+                    role="group"
+                    aria-labelledby={headerId}
+                  >
+                    <SnippetCard
+                      snippet={s}
+                      categories={categories}
+                      onDelete={handleDelete}
+                      onSetCategory={handleSetCategory}
+                      onActivity={setActiveSnippetId}
+                    />
+                  </li>
+                )),
+              ];
+            })}
+          </ul>
+        )}
+
+        <p className={styles.hint}>
+          Wrap a blank in [brackets] — like{" "}
+          <span className={styles.hintTag}>[first name]</span> or{" "}
+          <span className={styles.hintTag}>[what they mentioned]</span> — and
+          the AI fills it from the prospect and the conversation when drafting.
+        </p>
+      </div>
+    </Page>
   );
 }
 
-/** A short-lived status shown in a card header after a menu action. */
-type Flash = { kind: "ok" | "err"; text: string };
+/** The tab's page shell: title, standfirst, and whatever state the library is in
+ *  below. Wraps the loading and error states too, so the heading doesn't pop in
+ *  after the list resolves. */
+function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <div className={styles.page}>
+      <header className={styles.intro}>
+        <h1 className={styles.title}>Snippets</h1>
+        <p className={styles.subtitle}>
+          Everything you're willing to say, in your own words. A draft is
+          stitched from these and nothing else — the AI picks the ones that fit
+          whoever you're writing to and where the thread has got to.
+        </p>
+      </header>
+      {children}
+    </div>
+  );
+}
 
 /**
  * One approved snippet, as a collapsible. Collapsed, only the name shows (with its
  * category, if any); opening it reveals the editable name + content, each autosaved
  * after a short typing pause (via `useAutosave`). A blank (just-added) snippet opens
  * expanded so you type straight in. The header's context menu — right-click, or the
- * ⋯ button — copies the snippet elsewhere or deletes it. The unmount flush is
- * skipped mid-delete — the row is on its way out.
+ * ⋯ button — deletes it. The unmount flush is skipped mid-delete — the row is on its
+ * way out.
  */
 function SnippetCard({
   snippet,
   categories,
-  copyTargets,
   onDelete,
   onSetCategory,
-  onCopy,
   onActivity,
 }: {
   snippet: Snippet;
   categories: string[];
-  copyTargets: CopyTarget[];
   onDelete: (id: number) => Promise<void>;
   onSetCategory: (id: number, category: string) => Promise<void>;
-  onCopy: (id: number, targetId: number | null) => Promise<void>;
   /** Mark this card as the one being worked in (expanded / edited), so its stage
    *  section stays open through a background re-stage. */
   onActivity: (id: number) => void;
@@ -548,9 +533,7 @@ function SnippetCard({
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [flash, setFlash] = useState<Flash | null>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
-  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Synchronous re-entry guard (state updates are async); also tells the
   // autosave's unmount flush to stand down once a delete is underway.
   const deletingRef = useRef(false);
@@ -560,19 +543,6 @@ function SnippetCard({
     persist: (v) => updateSnippet(snippet.id, v.name, v.content),
     canFlush: () => !deletingRef.current,
   });
-
-  useEffect(
-    () => () => {
-      if (flashTimer.current) clearTimeout(flashTimer.current);
-    },
-    [],
-  );
-
-  function showFlash(next: Flash) {
-    if (flashTimer.current) clearTimeout(flashTimer.current);
-    setFlash(next);
-    flashTimer.current = setTimeout(() => setFlash(null), 2400);
-  }
 
   async function handleDelete() {
     if (deletingRef.current) return;
@@ -587,16 +557,6 @@ function SnippetCard({
       setConfirmingDelete(false);
       deletingRef.current = false;
       setDeleting(false);
-    }
-  }
-
-  async function handleCopy(target: CopyTarget) {
-    setMenuOpen(false);
-    try {
-      await onCopy(snippet.id, target.id);
-      showFlash({ kind: "ok", text: `Copied to ${target.name}` });
-    } catch (err) {
-      showFlash({ kind: "err", text: errorMessage(err) });
     }
   }
 
@@ -672,12 +632,6 @@ function SnippetCard({
           </button>
         )}
 
-        {flash && (
-          <span className={styles.flash} data-kind={flash.kind} role="status">
-            {flash.text}
-          </span>
-        )}
-
         {confirmingDelete ? (
           <div className={styles.confirm}>
             <button
@@ -709,7 +663,13 @@ function SnippetCard({
             title="Actions"
             disabled={deleting}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
               <circle cx="5" cy="12" r="1.6" fill="currentColor" />
               <circle cx="12" cy="12" r="1.6" fill="currentColor" />
               <circle cx="19" cy="12" r="1.6" fill="currentColor" />
@@ -722,20 +682,6 @@ function SnippetCard({
           onClose={() => setMenuOpen(false)}
           anchorRef={menuBtnRef}
         >
-          <div className={styles.menuLabel}>Copy to</div>
-          {copyTargets.length === 0 ? (
-            <div className={styles.menuEmpty}>No other pitches yet</div>
-          ) : (
-            copyTargets.map((t) => (
-              <MenuItem
-                key={t.id === null ? "profile" : t.id}
-                label={t.name}
-                leading={t.id === null ? <ProfileIcon /> : <PitchIcon />}
-                onSelect={() => void handleCopy(t)}
-              />
-            ))
-          )}
-          <div className={styles.menuDivider} role="separator" />
           <MenuItem
             label="Delete"
             danger
@@ -784,7 +730,13 @@ function SnippetCard({
 
 function Chevron() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
       <path
         d="M9 6l6 6-6 6"
         stroke="currentColor"
@@ -798,40 +750,21 @@ function Chevron() {
 
 function SparkIcon() {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
       <path
         d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"
         fill="currentColor"
       />
-      <path d="M18.5 14.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ProfileIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="8" r="3.4" stroke="currentColor" strokeWidth="1.7" />
       <path
-        d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinecap="round"
+        d="M18.5 14.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z"
+        fill="currentColor"
       />
-    </svg>
-  );
-}
-
-function PitchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M4 13V6a2 2 0 0 1 2-2h5l9 9-7 7-9-9z"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinejoin="round"
-      />
-      <circle cx="8.5" cy="8.5" r="1.3" fill="currentColor" />
     </svg>
   );
 }
@@ -933,14 +866,18 @@ function CategoryChip({
             autoFocus
           />
         </div>
-        {others.length > 0 && <div className={styles.menuLabel}>Move to</div>}
+        {others.length > 0 && <MenuNote heading>Move to</MenuNote>}
         {others.map((c) => (
           <MenuItem key={c} label={c} onSelect={() => void apply(c)} />
         ))}
         {snippet.category.trim() && (
           <>
-            <div className={styles.menuDivider} role="separator" />
-            <MenuItem label="Clear stage" danger onSelect={() => void apply("")} />
+            <MenuDivider />
+            <MenuItem
+              label="Clear stage"
+              danger
+              onSelect={() => void apply("")}
+            />
           </>
         )}
       </Popover>
@@ -996,7 +933,13 @@ function ProposedCard({
     <div className={styles.proposed} data-busy={busy !== null}>
       <div className={styles.proposedHead}>
         <span className={styles.proposedBadge}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
             <path
               d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"
               fill="currentColor"
@@ -1012,7 +955,9 @@ function ProposedCard({
       {error && <div className={styles.cardError}>{error}</div>}
 
       <div className={styles.proposedFoot}>
-        <span className={styles.proposedHint}>Spotted in a message you sent</span>
+        <span className={styles.proposedHint}>
+          Spotted in a message you sent
+        </span>
         <div className={styles.proposedActions}>
           <button
             type="button"
@@ -1032,7 +977,13 @@ function ProposedCard({
               "Approving…"
             ) : (
               <>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  aria-hidden="true"
+                >
                   <path
                     d="M5 12.5l4.5 4.5L19 7"
                     stroke="currentColor"

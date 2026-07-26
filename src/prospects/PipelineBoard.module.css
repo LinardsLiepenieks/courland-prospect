@@ -172,14 +172,27 @@
   margin-top: 2px;
 }
 
-/* Engagement tags (message count, awaiting reply) grouped left; stage menu sits right
- * via the foot's space-between. Wraps as a unit when the card is narrow. */
+/* Engagement tags (message count, awaiting reply) grouped left; the two menus sit
+ * right via the foot's space-between. Wraps as a unit when the card is narrow. */
 .cardTags {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
   min-width: 0;
+}
+
+/* Customer profile + stage, kept as one group so space-between can't strand them
+ * at opposite edges. `margin-left: auto` pins the pair right even when there are
+ * no tags to push against. */
+.cardMenus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .columnEmpty {

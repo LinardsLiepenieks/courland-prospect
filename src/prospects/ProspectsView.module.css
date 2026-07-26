@@ -5,12 +5,17 @@
   animation: enterUp 260ms var(--ease-out) both;
 }
 
-/* Pipeline needs room for several columns; fill the (fluid) content column and
-   let the board scroll horizontally within it. */
+/* The board is not a reading column — every 260px of width is another stage you
+   can see without scrolling. So it breaks out of the centered content column and
+   takes the window, keeping only the 24px gutter the navbar uses so the two line
+   up. Columns past the edge still scroll inside `.board`.
+   (`margin-inline: 50% - 50vw` lands the box on the viewport's left edge because
+   the parent is centered; `.app` clips the vw overshoot from a classic
+   scrollbar.) */
 .wrapWide {
-  padding: 28px 16px 48px;
-  width: 100%;
-  margin: 0 auto;
+  width: 100vw;
+  margin-inline: calc(50% - 50vw);
+  padding: 28px 24px 48px;
   animation: enterUp 260ms var(--ease-out) both;
 }
 
@@ -90,7 +95,7 @@
   border-radius: 9px;
 }
 
-/* Empty (pitch exists, no prospects captured yet) */
+/* Empty — nothing captured yet. */
 .blank {
   display: flex;
   flex-direction: column;
@@ -122,6 +127,37 @@
 /* Reserve vertical space while the (near-instant) local query resolves. */
 .loading {
   min-height: 200px;
+}
+
+/* ── Pipeline editor ─────────────────────────────────────── */
+/* Sits below the board it reorganizes, behind a generous gap and a hairline so
+   it reads as a settings shelf rather than part of the board. */
+.pipeline {
+  max-width: 640px;
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.pipelineHead {
+  margin-bottom: 14px;
+}
+
+.sectionTitle {
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.sectionBody {
+  margin-top: 2px;
+  max-width: 58ch;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.opError {
+  composes: error from "../styles/form.module.css";
 }
 
 @media (prefers-reduced-motion: reduce) {

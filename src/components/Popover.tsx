@@ -153,6 +153,28 @@ export function MenuItem({
   );
 }
 
+/** A hairline between groups of menu items. */
+export function MenuDivider() {
+  return <div className={styles.divider} role="separator" />;
+}
+
+/** A non-interactive line inside a menu: either a group heading (`heading`) or a
+ *  "nothing to pick" note. Both consumers had hand-rolled copies of these, which
+ *  is how the two menus drifted apart on spacing. */
+export function MenuNote({
+  children,
+  heading = false,
+}: {
+  children: ReactNode;
+  heading?: boolean;
+}) {
+  return (
+    <div className={styles.note} data-heading={heading || undefined}>
+      {children}
+    </div>
+  );
+}
+
 function CheckIcon({ visible }: { visible: boolean }) {
   return (
     <svg

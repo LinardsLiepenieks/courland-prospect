@@ -21,8 +21,8 @@
 }
 
 /* ── Sections ────────────────────────────────────────────── */
-/* Each section is separated by a hairline so the two concerns (context vs.
-   capture browsers) read as distinct groups on one page. */
+/* Each section is separated by a hairline so the two concerns (who you are vs.
+   which browser captures) read as distinct groups on one page. */
 .section {
   padding-top: 28px;
   margin-top: 28px;
@@ -88,7 +88,7 @@
 /* Reserves the vertical space the form will occupy so the layout doesn't jump
    when the singleton resolves. */
 .loading {
-  min-height: 300px;
+  min-height: 200px;
 }
 
 @media (prefers-reduced-motion: reduce) {

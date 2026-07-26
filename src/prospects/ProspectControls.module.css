@@ -113,3 +113,69 @@
   border-radius: 999px;
   background: var(--stage-accent, var(--text-faint));
 }
+
+/* ── Customer menu ───────────────────────────────────────── */
+/* Sits beside the stage pill but reads quieter: the stage is the prospect's
+   POSITION (what the whole board is organized around), while the customer
+   profile only steers their drafts. An outline instead of a color wash keeps the
+   two distinguishable at a glance without competing. */
+.customerMenu {
+  display: inline-flex;
+}
+
+.customerPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  padding: 3px 8px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition:
+    color 120ms var(--ease-out),
+    background-color 120ms var(--ease-out),
+    border-color 120ms var(--ease-out);
+}
+
+/* Unassigned is a normal resting state, not a warning — they're still in the
+   pipeline. Recede rather than alarm; a dashed edge reads as "slot to fill". */
+.customerPill[data-unassigned] {
+  color: var(--text-faint);
+  border-style: dashed;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .customerPill:hover:not(:disabled) {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 4%, transparent);
+    border-color: var(--text-faint);
+  }
+}
+
+.customerPill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.customerPill:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.customerPillName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personIcon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.75;
+}

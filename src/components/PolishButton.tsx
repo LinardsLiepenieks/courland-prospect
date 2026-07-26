@@ -6,8 +6,8 @@ import styles from "./PolishButton.module.css";
 interface Props {
   /** The current text to polish. */
   text: string;
-  /** The command that rewrites `text` (e.g. `polishSkill`, `polishWho`). Kept as
-   *  a prop so the button is decoupled from any one field/command. */
+  /** The command that rewrites `text` (e.g. `polishWho`, `polishProduct`). Kept
+   *  as a prop so the button is decoupled from any one field/command. */
   polish: (text: string) => Promise<string>;
   /** Disable externally (e.g. while the form is saving/submitting). */
   disabled?: boolean;
@@ -21,7 +21,7 @@ interface Props {
   onBusyChange?: (busy: boolean) => void;
 }
 
-/** A quiet action that rewrites the skill through the local Claude Code CLI.
+/** A quiet action that rewrites the field's text through the local Claude Code CLI.
  *  Non-destructive: it hands the result to `onPolished` for the caller to drop
  *  into the editor — the user still saves manually. */
 export default function PolishButton({

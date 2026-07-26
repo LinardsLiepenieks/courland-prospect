@@ -1,11 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { STAGE_COLORS, type StageColor, type StageKind } from "../api/stages";
 import { Popover } from "../components/Popover";
 import { stageAccentStyle } from "../lib/stageColor";
 import styles from "./StageEditor.module.css";
 
-/** A row in the editor. `id` is present once persisted (Settings); absent for
- *  unsaved rows in the create flow. `key` is stable for React + change routing. */
+/** A row in the editor. `id` is the persisted stage's id, absent on a row the
+ *  user just added — which is how the parent spots the new row to create (see
+ *  `PipelineSection.persist`). `key` is stable for React + change routing. */
 export interface DraftStage {
   key: string;
   id?: number;
@@ -25,42 +26,25 @@ export type StageChange =
 
 let keyCounter = 0;
 /** A fresh stable key for a newly-added (unsaved) row. */
-export function newStageKey(): string {
+function newStageKey(): string {
   keyCounter += 1;
   return `new-${keyCounter}`;
-}
-
-/** The built-in Full-cycle pipeline, as draft rows for the create flow. Mirrors
- *  the backend's `full_cycle_template`: the names must match, and colors come
- *  from the shared `STAGE_COLORS` rotation (same as the backend's
- *  `color_for_position`), so neither list needs hand-syncing. */
-const FULL_CYCLE: { name: string; kind: StageKind }[] = [
-  { name: "Messaged", kind: "messaging" },
-  { name: "Meeting", kind: "standard" },
-  { name: "Onboarding", kind: "standard" },
-  { name: "Feedback", kind: "standard" },
-];
-
-export function fullCycleDraft(): DraftStage[] {
-  return FULL_CYCLE.map((s, i) => ({
-    key: newStageKey(),
-    name: s.name,
-    kind: s.kind,
-    color: STAGE_COLORS[i % STAGE_COLORS.length],
-  }));
 }
 
 interface Props {
   stages: DraftStage[];
   /** Called with the resulting list and a description of the single edit. */
   onChange: (next: DraftStage[], change: StageChange) => void;
-  /** Locks all controls while a persist is in flight (Settings). */
+  /** Locks all controls while a persist is in flight. */
   disabled?: boolean;
 }
 
-/** Edit a pitch's pipeline: rename, add, remove, reorder. The first stage is the
- *  messaging stage — renameable, but locked to the top and never removable. Used
- *  in both the create flow (local draft) and Settings (persisted). */
+/** Edit the pipeline: rename, add, remove, reorder. The first stage is the
+ *  messaging stage — renameable, but locked to the top and never removable.
+ *
+ *  There is one shared pipeline, seeded by migration, so every edit here persists
+ *  immediately; the editor stays purely presentational and routes each change to
+ *  the parent, which owns the API calls. */
 export default function StageEditor({
   stages,
   onChange,
@@ -114,6 +98,10 @@ export default function StageEditor({
             key={stage.key}
             stage={stage}
             first={index === 0}
+            // Index 1 sits directly under the pinned messaging stage, so it has
+            // nowhere to move up to — `move` refuses it, and an enabled button
+            // that does nothing reads as a bug.
+            firstMovable={index === 1}
             last={index === stages.length - 1}
             disabled={disabled}
             onRename={(name) => rename(stage.key, name)}
@@ -140,6 +128,7 @@ export default function StageEditor({
 function StageRow({
   stage,
   first,
+  firstMovable,
   last,
   disabled,
   onRename,
@@ -150,6 +139,7 @@ function StageRow({
 }: {
   stage: DraftStage;
   first: boolean;
+  firstMovable: boolean;
   last: boolean;
   disabled: boolean;
   onRename: (name: string) => void;
@@ -161,6 +151,15 @@ function StageRow({
   // Local editing buffer so we commit a rename once (on blur / Enter), not per
   // keystroke — the parent may persist each committed change.
   const [value, setValue] = useState(stage.name);
+
+  // Follow the committed name whenever the parent's copy changes underneath us.
+  // Rows are keyed by a stable id, so this component survives a rejected save:
+  // the parent reverts `stage.name` to the last good value while the buffer
+  // still holds the text the server refused, leaving the field showing a name
+  // that isn't saved — and re-firing the same doomed rename on the next blur.
+  useEffect(() => {
+    setValue(stage.name);
+  }, [stage.name]);
 
   function commit() {
     const trimmed = value.trim();
@@ -178,8 +177,7 @@ function StageRow({
           type="button"
           className={styles.moveBtn}
           onClick={onMoveUp}
-          // index 1 is the first movable row; it can't move above messaging.
-          disabled={disabled || first || undefined}
+          disabled={disabled || first || firstMovable || undefined}
           aria-label={`Move ${stage.name} up`}
         >
           <ChevronIcon dir="up" />

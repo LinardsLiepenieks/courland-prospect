@@ -9,9 +9,13 @@ export interface Prospect {
   linkedin_url: string;
   /** Their headline/title as scraped, if any. */
   headline: string;
-  /** The pitch being run on them. `null` if that pitch was later deleted. */
-  pitch_id: number | null;
-  /** The pipeline stage they're currently in. `null` if unassigned. */
+  /** The customer profile they match — what steers their drafts toward a goal.
+   *  `null` when unassigned, which is a valid resting state: they're still in
+   *  the pipeline, their drafts just get no goal. Deleting a customer profile
+   *  leaves its prospects here, unassigned. */
+  customer_id: number | null;
+  /** The pipeline stage they're currently in. `null` only if their stage was
+   *  deleted out from under them. */
   stage_id: number | null;
   /** Outreach counter shown in the messaging stage. Read-only: derived from
    *  messages the Chrome extension captures, not set by hand. */
@@ -39,13 +43,23 @@ export function deleteProspect(id: number): Promise<void> {
   return invoke("delete_prospect", { id });
 }
 
-/** Move a prospect to a different stage of its pipeline (drag or stage menu).
+/** Move a prospect to a different stage of the pipeline (drag or stage menu).
  *  Returns the updated prospect. */
 export function setProspectStage(
   id: number,
   stageId: number,
 ): Promise<Prospect> {
   return invoke("set_prospect_stage", { id, stageId });
+}
+
+/** Re-tag which customer profile a prospect matches, or clear it (`null`). Only
+ *  changes how their drafts are steered — never moves them on the board — so the
+ *  UI offers it inline with no confirmation. Returns the updated prospect. */
+export function setProspectCustomer(
+  id: number,
+  customerId: number | null,
+): Promise<Prospect> {
+  return invoke("set_prospect_customer", { id, customerId });
 }
 
 /** Subscribe to backend "prospects changed" pushes — fired when the Chrome

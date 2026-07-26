@@ -16,7 +16,7 @@ interface Result {
 /**
  * The shared "one async action, with a busy flag and a caught error" pattern —
  * previously copy-pasted as a `xxxRef` + `busy` state + try/catch/finally in
- * every form (create pitch, add snippet, open Chrome profile).
+ * every form (add customer, add snippet, open Chrome profile).
  *
  * Scoped to actions where the component **stays mounted** across the action
  * (the reset runs in `finally`). Delete-then-unmount flows deliberately keep

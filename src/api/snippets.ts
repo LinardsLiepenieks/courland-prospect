@@ -8,14 +8,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
  *    to compose a draft until approved. */
 export type SnippetStatus = "approved" | "proposed";
 
-/** A snippet: a named text fragment that will later compose into messages. Owned
- *  by exactly one place — a pitch (`pitch_id` set) or the global profile
- *  (`pitch_id` null). The origin (pitch vs profile) is always known from
- *  `pitch_id`. */
+/** A snippet: a named text fragment that composes into messages.
+ *
+ *  There is ONE library. Every draft sees all of it, and picking the lines that
+ *  move a given customer profile toward its goal is the AI's job — which is why
+ *  a snippet has no owner. `position` and `category` say *when* in a thread a
+ *  line belongs, never *whom* it's for. */
 export interface Snippet {
   id: number;
-  /** Owning pitch, or `null` when the snippet belongs to the global profile. */
-  pitch_id: number | null;
   name: string;
   content: string;
   status: SnippetStatus;
@@ -30,20 +30,18 @@ export interface Snippet {
 }
 
 // Typed wrappers over the Rust snippet commands. All SQL lives in the backend;
-// these are the only entry points the UI uses to touch snippet data. `pitchId`
-// is `null` for the global/profile scope and a pitch id for a pitch's snippets.
+// these are the only entry points the UI uses to touch snippet data.
 
-export function listSnippets(pitchId: number | null): Promise<Snippet[]> {
-  return invoke("list_snippets", { pitchId });
+export function listSnippets(): Promise<Snippet[]> {
+  return invoke("list_snippets");
 }
 
-/** Create a blank snippet in the given scope. The card is filled in afterwards
- *  via `updateSnippet`. */
-export function createSnippet(pitchId: number | null): Promise<Snippet> {
-  return invoke("create_snippet", { pitchId });
+/** Create a blank snippet. The card is filled in afterwards via `updateSnippet`. */
+export function createSnippet(): Promise<Snippet> {
+  return invoke("create_snippet");
 }
 
-/** Persist a snippet's name + content. Ownership is fixed at creation. */
+/** Persist a snippet's name + content. */
 export function updateSnippet(
   id: number,
   name: string,
@@ -73,35 +71,20 @@ export function setSnippetCategory(
   return invoke("set_snippet_category", { id, category });
 }
 
-/** Copy a snippet into another scope as an independent duplicate. `targetPitchId`
- *  is a pitch id, or `null` for the global profile. The new snippet carries only the
- *  source's name + content (it re-classifies in its new scope); the source is left
- *  untouched. Returns the newly created snippet. */
-export function copySnippet(
-  id: number,
-  targetPitchId: number | null,
-): Promise<Snippet> {
-  return invoke("copy_snippet", { id, targetPitchId });
-}
-
-/** Re-score and re-categorize every approved snippet in a scope through the AI — the
+/** Re-score and re-categorize every approved snippet through the AI — the
  *  "reorganize my whole library" action. A full reset: it overwrites hand-picked
  *  categories and hands each snippet back to auto-classification. Resolves when the
  *  whole batch finishes, with the number of snippets changed; the backend fires a
  *  single `snippets://changed` event at the end (not one per snippet), so OTHER open
- *  editors for the scope reconcile in one reshuffle — this caller reloads off its own
- *  resolution. `pitchId` is `null` for the profile scope, a pitch id otherwise. */
-export function reclassifySnippets(pitchId: number | null): Promise<number> {
-  return invoke("reclassify_snippets", { pitchId });
+ *  editors reconcile in one reshuffle — this caller reloads off its own resolution. */
+export function reclassifySnippets(): Promise<number> {
+  return invoke("reclassify_snippets");
 }
 
 /** Subscribe to backend "snippets changed" pushes — fired when a background pass
- *  changes a scope's snippets (a new proposal lands, or a classify pass updates a
- *  snippet's position/category). The payload is the affected scope: a pitch id, or
- *  `null` for the global profile — so a listener reloads only when its own scope
- *  changed. */
-export function onSnippetsChanged(
-  cb: (scope: number | null) => void,
-): Promise<UnlistenFn> {
-  return listen<number | null>("snippets://changed", (e) => cb(e.payload));
+ *  changes the library (a new proposal lands, or a classify pass updates a
+ *  snippet's position/category). No payload: there is one library, so there is
+ *  nothing to scope the event to. */
+export function onSnippetsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen("snippets://changed", () => cb());
 }

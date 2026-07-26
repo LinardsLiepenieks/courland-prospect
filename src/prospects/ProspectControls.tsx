@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
+import type { Customer } from "../api/customers";
 import type { Stage } from "../api/stages";
-import { MenuItem, Popover } from "../components/Popover";
+import { MenuDivider, MenuItem, MenuNote, Popover } from "../components/Popover";
 import { stageAccentStyle } from "../lib/stageColor";
 import styles from "./ProspectControls.module.css";
 
@@ -88,6 +89,99 @@ export function StageMenu({
         ))}
       </Popover>
     </div>
+  );
+}
+
+/**
+ * A pill showing which customer profile this prospect matches, opening a menu to
+ * re-tag them (or clear it).
+ *
+ * Deliberately quieter than the stage pill beside it: the stage is *where they
+ * are*, which the whole board is organized around, while the profile is *how
+ * their drafts get steered* — important, but not a position. Re-tagging is
+ * instant and reversible (it never moves them on the board), so there's no
+ * confirmation.
+ */
+export function CustomerMenu({
+  customers,
+  currentCustomerId,
+  onSet,
+  busy,
+}: {
+  customers: Customer[];
+  currentCustomerId: number | null;
+  onSet: (customerId: number | null) => void;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const current = customers.find((c) => c.id === currentCustomerId);
+  const unassigned = !current;
+
+  function pick(customerId: number | null) {
+    setOpen(false);
+    if (customerId !== currentCustomerId) onSet(customerId);
+  }
+
+  return (
+    <div className={styles.customerMenu}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={styles.customerPill}
+        data-unassigned={unassigned || undefined}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        disabled={busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={
+          current
+            ? `Customer profile: ${current.name}`
+            : "No customer profile — drafts for this person won't have a goal"
+        }
+      >
+        <PersonIcon />
+        <span className={styles.customerPillName}>
+          {current?.name ?? "No profile"}
+        </span>
+        <ChevronDown />
+      </button>
+      <Popover open={open} onClose={() => setOpen(false)} anchorRef={triggerRef}>
+        {customers.map((c) => (
+          <MenuItem
+            key={c.id}
+            label={c.name}
+            checked={c.id === currentCustomerId}
+            onSelect={() => pick(c.id)}
+          />
+        ))}
+        {customers.length === 0 && <MenuNote>No customer profiles yet</MenuNote>}
+        <MenuDivider />
+        <MenuItem
+          label="No profile"
+          checked={unassigned}
+          onSelect={() => pick(null)}
+        />
+      </Popover>
+    </div>
+  );
+}
+
+function PersonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className={styles.personIcon}>
+      <circle cx="12" cy="8" r="3.4" stroke="currentColor" strokeWidth="1.8" />
+      <path
+        d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

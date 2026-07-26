@@ -8,9 +8,9 @@ import { useGate } from "../gate/useGate";
  *
  * `App` stays mounted underneath the gate the whole time — the gate is a fixed
  * opaque overlay, not a swap. A transient not-ready blip (a missed heartbeat, a
- * stale poll) therefore never tears down the working session: the active pitch,
- * tab, and any in-flight edits survive, and autosave hooks don't fire spurious
- * unmount flushes. When readiness recovers the overlay simply lifts.
+ * stale poll) therefore never tears down the working session: the active tab and
+ * any in-flight edits survive, and autosave hooks don't fire spurious unmount
+ * flushes. When readiness recovers the overlay simply lifts.
  */
 export default function Root() {
   const status = useGate();

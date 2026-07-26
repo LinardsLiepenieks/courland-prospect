@@ -4,6 +4,13 @@
   position: fixed;
   z-index: 50;
   min-width: 160px;
+  /* Menus are built from user data now — one item per customer profile, one per
+     snippet category — so the list has no fixed ceiling. Without a bound the
+     clamp pins an over-tall menu to the viewport edge with its overflow simply
+     unreachable; cap it and let the surface scroll instead. */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
@@ -100,4 +107,27 @@
   .surface {
     animation: none;
   }
+}
+
+/* ── Non-interactive menu lines ──────────────────────────── */
+/* A group heading or a "nothing to pick" note. Lives here beside `.item` rather
+   than in each consumer's module — two menus had drifted copies of both. */
+.note {
+  padding: 3px 10px 6px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.note[data-heading] {
+  padding: 5px 10px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }

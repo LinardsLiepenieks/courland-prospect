@@ -2,18 +2,26 @@ import type { ProspectViewProps } from "./ProspectsView";
 import { formatDate } from "../lib/date";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
-import { MessageCount, AwaitingReplyBadge, StageMenu } from "./ProspectControls";
+import {
+  MessageCount,
+  AwaitingReplyBadge,
+  CustomerMenu,
+  StageMenu,
+} from "./ProspectControls";
 import styles from "./ProspectsList.module.css";
 
-/** Flat list view: one row per prospect with its stage, outreach counter (in the
- *  messaging stage), captured date, and delete. Dense and scannable. */
+/** Flat list view: one row per prospect with its customer profile, stage,
+ *  outreach counter (in the messaging stage), captured date, and delete. Dense
+ *  and scannable. */
 export default function ProspectsList({
   prospects,
   stages,
+  customers,
   messagingStageId,
   busyIds,
   onOpen,
   onMove,
+  onSetCustomer,
   onDelete,
 }: ProspectViewProps) {
   return (
@@ -41,6 +49,12 @@ export default function ProspectsList({
             <div className={styles.aside}>
               {inMessaging && <MessageCount value={p.messages_sent} />}
               {p.awaiting_reply && <AwaitingReplyBadge />}
+              <CustomerMenu
+                customers={customers}
+                currentCustomerId={p.customer_id}
+                onSet={(customerId) => onSetCustomer(p.id, customerId)}
+                busy={busy}
+              />
               <StageMenu
                 stages={stages}
                 currentStageId={effectiveStage}

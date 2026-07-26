@@ -256,7 +256,7 @@ export default function CommentsView() {
         <h2 className={styles.sectionTitle}>Watchlist</h2>
         <p className={styles.sectionSub}>
           LinkedIn profiles a scrape checks for new posts before the feed — a
-          hand-picked list, global, not tied to any pitch.
+          hand-picked list, whoever they are.
         </p>
         <WatchlistSection />
       </section>
