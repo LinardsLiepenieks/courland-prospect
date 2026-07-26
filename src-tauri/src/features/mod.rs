@@ -5,8 +5,10 @@
 //! `crate::database`, not here.
 
 pub mod comments;
+pub mod customers;
 pub mod messages;
 pub mod pitches;
+pub mod product;
 pub mod profile;
 pub mod prospects;
 pub mod selectors;
