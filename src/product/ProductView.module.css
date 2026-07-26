@@ -1,0 +1,81 @@
+.product {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* ── Page intro ──────────────────────────────────────────── */
+.intro {
+  margin-bottom: 28px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── Form (field styles composed from the shared form module) ─ */
+.form {
+  composes: form from "../styles/form.module.css";
+}
+
+.fieldLabel {
+  composes: fieldLabel from "../styles/form.module.css";
+}
+
+.input {
+  composes: input from "../styles/form.module.css";
+}
+
+.fieldHeader {
+  composes: fieldHeader from "../styles/form.module.css";
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+.actions {
+  composes: actions from "../styles/form.module.css";
+}
+
+.primaryBtn {
+  composes: primaryBtn from "../styles/form.module.css";
+}
+
+/* Guidance under the label, above the field it explains — the description is
+   the one field in the app where writing the wrong *kind* of thing (a tagline,
+   or copy aimed at one buyer) quietly degrades every draft. */
+.hint {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* This is the longest-form field in the app — the whole product story lives
+   here, so it opens tall enough to write into rather than a two-line slot the
+   user has to fight. */
+.description {
+  composes: textarea from "../styles/form.module.css";
+  min-height: 340px;
+}
+
+/* ── Load state ──────────────────────────────────────────── */
+/* Reserves the vertical space the form will occupy so the layout doesn't jump
+   when the singleton resolves. */
+.loading {
+  min-height: 520px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .product {
+    animation: none;
+  }
+}

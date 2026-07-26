@@ -1,0 +1,311 @@
+.customers {
+  animation: enterUp 260ms var(--ease-out) both;
+}
+
+/* ── Page intro ──────────────────────────────────────────── */
+.intro {
+  margin-bottom: 24px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin-top: 6px;
+  max-width: 62ch;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ── List ────────────────────────────────────────────────── */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+  /* Only the border moves on expand — the height change is content-driven and
+     left un-animated, since animating height would mean measuring it and would
+     jank the textareas mid-type. */
+  transition: border-color 160ms var(--ease-out);
+}
+
+.card[data-expanded] {
+  border-color: var(--border-strong);
+}
+
+/* ── Collapsed summary row ───────────────────────────────── */
+/* The whole row is the toggle: name, then the goal, which is the one thing
+   worth seeing at a glance — it's what every draft for this buyer aims at. */
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 13px 14px;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 12px;
+  transition: background-color 140ms var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cardHead:hover {
+    background: color-mix(in srgb, var(--text) 3%, transparent);
+  }
+}
+
+.chevron {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--text-faint);
+  transition: transform 180ms var(--ease-out);
+}
+
+.chevron[data-expanded] {
+  transform: rotate(90deg);
+}
+
+.cardName {
+  flex-shrink: 0;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+/* The goal trails the name and truncates — a long goal must never push the row
+   to two lines and break the list's rhythm. */
+.cardGoal {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.goalIcon {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
+}
+
+.cardGoalEmpty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* ── Expanded editor ─────────────────────────────────────── */
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 14px 14px;
+  /* Expansion is a reveal, not a slide: fade the body in from a few px so it
+     reads as unfolding out of the row it belongs to. */
+  animation: enterUp 200ms var(--ease-out) both;
+}
+
+.fieldLabel {
+  composes: fieldLabel from "../styles/form.module.css";
+}
+
+.input {
+  composes: input from "../styles/form.module.css";
+}
+
+/* The three steering fields are short prose, not essays — a tighter box than
+   the shared textarea invites a sentence rather than a page. */
+.textarea {
+  composes: textarea from "../styles/form.module.css";
+  min-height: 72px;
+}
+
+.hint {
+  margin: -2px 0 7px;
+  max-width: 68ch;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.error {
+  composes: error from "../styles/form.module.css";
+}
+
+/* ── Card actions ────────────────────────────────────────── */
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.actionSpacer {
+  flex: 1;
+}
+
+.savingHint {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.confirmText {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.deleteTrigger,
+.deleteBtn,
+.secondaryBtn {
+  flex-shrink: 0;
+  padding: 7px 13px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.deleteTrigger:active:not(:disabled),
+.deleteBtn:active:not(:disabled),
+.secondaryBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.deleteTrigger:disabled,
+.deleteBtn:disabled,
+.secondaryBtn:disabled {
+  opacity: 0.5;
+}
+
+/* Quiet until intent is shown — and deleting a profile is genuinely cheap here
+   (the prospects survive), so it stays understated rather than alarming. */
+.deleteTrigger {
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .deleteTrigger:hover:not(:disabled) {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+}
+
+.deleteBtn {
+  color: #fff;
+  background: var(--danger);
+  border: 1px solid transparent;
+}
+
+.deleteBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, #000);
+}
+
+.secondaryBtn {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.secondaryBtn:hover:not(:disabled) {
+  border-color: var(--text-faint);
+}
+
+/* ── Add ─────────────────────────────────────────────────── */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 550;
+  transition:
+    color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .addBtn:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--text-faint);
+  }
+}
+
+.addBtn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.addBtn:disabled {
+  opacity: 0.5;
+}
+
+.plusIcon {
+  width: 14px;
+  height: 14px;
+}
+
+/* ── Empty + load states ─────────────────────────────────── */
+.blank {
+  padding: 28px 0 20px;
+}
+
+.blankTitle {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.blankBody {
+  margin-top: 6px;
+  max-width: 58ch;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.loading {
+  min-height: 220px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .customers,
+  .cardBody {
+    animation: none;
+  }
+  .chevron {
+    transition: none;
+  }
+  .deleteTrigger:active:not(:disabled),
+  .deleteBtn:active:not(:disabled),
+  .secondaryBtn:active:not(:disabled),
+  .addBtn:active:not(:disabled) {
+    transform: none;
+  }
+}
