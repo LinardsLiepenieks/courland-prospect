@@ -23,8 +23,8 @@ database/               # shared infra — no feature logic
     mod.rs              #   versioned runner (user_version pragma, per-tx steps)
     NNNN_name.sql       #   one file per migration, embedded via include_str!
 features/               # one folder per concept, each a self-contained slice
-  mod.rs                #   declares each feature module (`pub mod pitches;` ...)
-  <feature>/            #   e.g. pitches/
+  mod.rs                #   declares each feature module (`pub mod customers;` ...)
+  <feature>/            #   e.g. customers/
     mod.rs              #     `pub mod commands;` + private `model`/`repository`
     model.rs            #     struct(s) + `from_row` mapping
     repository.rs       #     ALL SQL; fns take &Connection, no Tauri types (unit-tested in-memory)
@@ -40,7 +40,7 @@ A feature is a **vertical slice**, not just a controller: it owns its data shape
 - Adding a table = a new `database/migrations/NNNN_name.sql` file + one `include_str!` line. Never edit a shipped migration; only append.
 - Migrations are non-destructive by contract — a failed open fails loud, it must never discard the user's DB.
 
-`features/pitches/` is the reference instance — copy its shape.
+`features/customers/` is the reference instance — copy its shape.
 
 ### Research
 - **Look things up online yourself when relevant.** If an API, library version, error, or best practice is uncertain, search/fetch to confirm rather than guessing — don't wait to be told.

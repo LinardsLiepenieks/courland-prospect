@@ -5,21 +5,30 @@ Its design draws from Peter Kazanjy's *Founding Sales*: explicit pipeline stages
 lead qualification, and low-friction data hygiene.
 
 Prospects are captured straight from LinkedIn by a bundled Chrome extension, organized
-into per-pitch pipelines, and replied to with drafts composed by your own local
+into one pipeline, and replied to with drafts composed by your own local
 [Claude Code](https://claude.com/claude-code) install — no API keys, no cloud sync.
 Everything lives in a single local SQLite database on your machine.
 
+The model is one product, several kinds of buyer. You describe what you sell **once**;
+each **customer profile** says who a kind of buyer is, what they care about, and what a
+thread with them should achieve. A draft is then composed by picking, from your single
+snippet library, the lines that speak to *that* buyer and move the conversation one step
+toward *their* goal.
+
 ## What it does
 
-- **Pitches** — each pitch is a self-contained campaign: a name, a "skill" (what you're
-  selling), and its own set of pipeline stages. The active pitch scopes the whole app.
-- **Prospects & pipeline** — a board of prospects per pitch, movable across stages, with
-  an "awaiting reply" flag derived from captured message history.
-- **Profile** — global "who you are" / "what you're building" context, reused across
-  every pitch's drafts.
-- **Snippets** — reusable message building blocks (global or pitch-scoped) with
-  `[bracket]` placeholders filled from context. Drafts compose *only* from your snippets
-  and profile — nothing is invented.
+- **Product** — the one thing you sell, written out once. The single source of product
+  truth every draft and comment is composed against.
+- **Customers** — an ideal-customer profile per kind of buyer: who they are, what they
+  care about, and the goal for a thread with them. This is what steers snippet choice;
+  it owns no pipeline and no snippets of its own.
+- **Prospects & pipeline** — one board everyone moves through, with an "awaiting reply"
+  flag derived from captured message history. Each prospect points at a customer
+  profile (or none — they still sit in the pipeline, their drafts just get no goal).
+- **Snippets** — one library of reusable message building blocks, tagged by *where in a
+  conversation* they fit, with `[bracket]` placeholders filled from context. Drafts
+  compose *only* from your snippets and profile — nothing is invented.
+- **Profile** — global "who you are" context: your background, role, and voice.
 - **LinkedIn capture** — a Chrome extension adds a capture button to LinkedIn: save a
   person as a prospect and pull their chat history into the CRM.
 - **AI drafting & polish** — reply drafts are pre-generated in one inbox pass and opened
@@ -49,15 +58,16 @@ sits alongside:
 src-tauri/src/
   lib.rs                  # Tauri builder: opens the DB, manages state, registers commands
   database/               # open() + AppState (single Mutex<Connection>); versioned migrations
-  features/               # one folder per concept — pitches, prospects, stages, profile,
-                          #   snippets, messages (each: mod / model / repository / commands)
+  features/               # one folder per concept — product, customers, prospects,
+                          #   stages, profile, snippets, messages, comments, watchlist
+                          #   (each: mod / model / repository / commands)
   ai/                     # single path to the local Claude Code CLI (prompt + client)
   ingest/                 # loopback HTTP server, Chrome discovery, heartbeat gate, security
   util.rs                 # shared input bounds
 
 src/                      # React frontend
-  app/                    # top-level shell, tabs, active-pitch state
-  pitches/ prospects/ profile/  # per-feature views
+  app/                    # top-level shell + tabs
+  product/ customers/ prospects/ snippets/ profile/  # per-feature views
   gate/                   # gate screen + heartbeat polling
   api/                    # typed wrappers over Tauri commands
   components/ lib/ styles/       # shared UI, hooks, global CSS
