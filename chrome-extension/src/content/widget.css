@@ -78,7 +78,7 @@
   cursor: progress;
 }
 
-/* Read-only "Prospect of <pitch>" status, shown instead of the add cluster once
+/* Read-only "Prospect · <customer>" status, shown instead of the add cluster once
    the person is already tracked. Deliberately NOT button-like: crimson appears
    only as a small accent dot (not a fill), text is muted, and there are no
    hover/press affordances — it reads as a settled fact, not a control. */
@@ -171,7 +171,7 @@
 
 /* ── "Draft for [N]" batch control ──────────────────────────────────────────
    Its own full-width row, injected directly under the messaging top bar (above
-   the thread list). One horizontal line — [pitch] [Draft for] [count] — with a
+   the thread list). One horizontal line — [customer] [Draft for] [count] — with a
    hairline separating it from the list. The status line floats just below the
    row (absolute) so it never stretches it. */
 .cp-draft-control {
@@ -191,7 +191,7 @@
     -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 }
 
-.cp-draft-pitch {
+.cp-draft-customer {
   flex: 1 1 auto;
   min-width: 0;
   max-width: 240px;
@@ -205,7 +205,7 @@
   cursor: pointer;
 }
 
-.cp-draft-pitch:disabled {
+.cp-draft-customer:disabled {
   opacity: 0.6;
   cursor: default;
 }

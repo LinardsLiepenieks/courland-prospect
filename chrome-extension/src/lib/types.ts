@@ -1,12 +1,15 @@
 // Shapes shared between the content script and the service worker. These mirror
-// the Rust side (features/pitches, features/prospects) — keep them in sync.
+// the Rust side (features/customers, features/prospects) — keep them in sync.
 
-/** A pitch, as returned by the app's `GET /pitches`. */
-export interface Pitch {
+/** A customer profile (ICP), as returned by the app's `GET /customers`.
+ *
+ *  Only the fields the extension actually shows. The app returns the profile's
+ *  steering text too (who they are / their pain / the goal), but that's for the
+ *  draft prompt to read server-side — the extension never needs it, so it isn't
+ *  mirrored here. */
+export interface Customer {
   id: number;
   name: string;
-  skill: string;
-  created_at: string;
 }
 
 /** The payload the content script captures and POSTs to `/prospects`. */
@@ -14,7 +17,7 @@ export interface NewProspect {
   name: string;
   linkedin_url: string;
   headline?: string;
-  pitch_id?: number | null;
+  customer_id?: number | null;
   note?: string;
 }
 
@@ -26,20 +29,22 @@ export interface AddProspectResult {
     name: string;
     linkedin_url: string;
     headline: string;
-    pitch_id: number | null;
+    customer_id: number | null;
     note: string;
     created_at: string;
   };
 }
 
 /** `GET /prospect` response: whether the open thread's person is already a
- *  prospect, and which pitch they're on. `pitch_id` is null when the prospect was
- *  added without a pitch (deleting a pitch removes its prospects, so it never strands
- *  a null-pitch row). The extension resolves the pitch *name* from the pitch list it
- *  already fetched (no name is sent here). */
+ *  prospect, and which customer profile they match. `customer_id` is null when
+ *  they're unassigned — captured without a profile, or their profile was deleted
+ *  since (which leaves the prospect in the pipeline, just unassigned). That's a
+ *  valid state, not an error: their drafts simply get no goal to steer toward.
+ *  The extension resolves the *name* from the customer list it already fetched
+ *  (no name is sent here). */
 export interface ProspectLookup {
   exists: boolean;
-  pitch_id: number | null;
+  customer_id: number | null;
 }
 
 /** Who sent a captured message. `outgoing` = you messaged the prospect (drives
@@ -79,17 +84,26 @@ export interface DraftMessageInput {
 }
 
 /** What the content script sends the SW to draft one reply. The conversation is
- *  scraped live from the open thread; `pitch_id` selects the snippet library. */
+ *  scraped live from the open thread; `customer_id` is the profile to steer the
+ *  reply toward, and may be null — an unmatched prospect still gets a draft, just
+ *  one composed from the product and snippets with no goal to aim at. */
 export interface DraftReplyPayload {
   prospect_name: string;
-  pitch_id: number;
+  customer_id: number | null;
   messages: DraftMessageInput[];
 }
 
 /** `POST /draft` response: the composed reply, or an ALL-CAPS reason it couldn't
- *  be built. Written verbatim into the thread's compose box either way. */
+ *  be built. Written verbatim into the thread's compose box either way.
+ *
+ *  `blocked` marks the one refusal that isn't about this thread: the app has no
+ *  product description, no profile, and no snippets, so NOTHING can be drafted
+ *  until the user sets it up. Every conversation in a batch would come back the
+ *  same, so the runner stops on the first one instead of writing the refusal into
+ *  every open composer. Absent on older app builds — treat as false. */
 export interface DraftResult {
   draft: string;
+  blocked?: boolean;
 }
 
 // ── The LinkedIn commenter ───────────────────────────────────────────────────
@@ -161,7 +175,7 @@ export interface OutboxItem extends CapturedMessage {
 
 export type Request =
   | { type: "checkin" }
-  | { type: "listPitches" }
+  | { type: "listCustomers" }
   | { type: "lookupProspect"; payload: { linkedin_url: string } }
   | { type: "addProspect"; payload: NewProspect }
   | { type: "queueMessages"; payload: QueueMessagesPayload }

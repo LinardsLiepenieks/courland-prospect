@@ -58,6 +58,22 @@ async function call(path: string, init: RequestInit = {}): Promise<globalThis.Re
   }
 }
 
+/** Parse a non-2xx into a message worth showing. The app answers errors with a
+ *  plain-text reason ("name and linkedin_url are required", "field too long"),
+ *  which tells the user what to do; a bare "Server returned 400" doesn't. Falls
+ *  back to the status when the body is empty or unreadable, and caps the length so
+ *  a stray HTML error page can't blow up a toast. */
+async function errorFrom(res: globalThis.Response): Promise<Error> {
+  let detail = "";
+  try {
+    detail = (await res.text()).trim();
+  } catch {
+    // Body already consumed or the stream broke — the status alone will do.
+  }
+  if (!detail || detail.length > 200) return new Error(`Server returned ${res.status}`);
+  return new Error(detail);
+}
+
 /** Check in with the app so it knows we're alive, and flush anything the outbox
  *  is holding from while it was closed. */
 async function ping(): Promise<void> {
@@ -449,17 +465,17 @@ async function handle(msg: Request): Promise<Response<unknown>> {
       void ping();
       return { ok: true, data: null };
     }
-    if (msg.type === "listPitches") {
-      const res = await call("/pitches");
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    if (msg.type === "listCustomers") {
+      const res = await call("/customers");
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "lookupProspect") {
-      // Is the open thread's person already a prospect, and on which pitch? Read
-      // by URL so the widget can show "Prospect of <pitch>" instead of the add
-      // control, and drafting can use that prospect's own pitch.
+      // Is the open thread's person already a prospect, and on which customer? Read
+      // by URL so the widget can show "Prospect · <customer>" instead of the add
+      // control, and drafting can use that prospect's own customer.
       const res = await call(`/prospect?url=${encodeURIComponent(msg.payload.linkedin_url)}`);
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "addProspect") {
@@ -467,12 +483,12 @@ async function handle(msg: Request): Promise<Response<unknown>> {
         method: "POST",
         body: JSON.stringify(msg.payload),
       });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "draftReply") {
       const res = await call("/draft", { method: "POST", body: JSON.stringify(msg.payload) });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "resetReviewQueue") {
@@ -501,7 +517,7 @@ async function handle(msg: Request): Promise<Response<unknown>> {
       // Persisted LinkedIn-selector overrides the content script merges over its
       // defaults at startup. Empty `{}` when nothing's been healed.
       const res = await call("/selectors");
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "healSelectors") {
@@ -511,7 +527,7 @@ async function handle(msg: Request): Promise<Response<unknown>> {
         method: "POST",
         body: JSON.stringify(msg.payload),
       });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) throw await errorFrom(res);
       return { ok: true, data: await res.json() };
     }
     if (msg.type === "pollCommentWork") {

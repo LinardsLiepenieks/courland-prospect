@@ -35,9 +35,10 @@ import { IDENTITY_KEYS, requestHeal, THREAD_KEYS } from "./heal";
 import { showToast } from "./toast";
 import { hideDraftOverlay, showDraftOverlay } from "./overlay";
 import { delay } from "../lib/delay";
-import { DRAFT_NS_REPLY, FILL_HASH, LAST_PITCH_KEY } from "../lib/storageKeys";
+import { DRAFT_NS_REPLY, FILL_HASH } from "../lib/storageKeys";
+import { recallCustomerId, rememberCustomer } from "../lib/lastCustomer";
 import { clearDrafts, peekDraft, putDraft, removeDraft } from "../lib/draftStore";
-import type { DraftMessageInput, DraftResult, Pitch, ProspectLookup } from "../lib/types";
+import type { DraftMessageInput, DraftResult, Customer, ProspectLookup } from "../lib/types";
 
 /** Whether this tab was opened by the review-tab queue to be pre-filled with a
  *  cached draft — detected by the `#cpfill` hash marker the queue appends. Read
@@ -55,21 +56,25 @@ const COUNTS = [1, 5, 10, 20, 50];
 const DEFAULT_COUNT = 20;
 
 /**
- * Build the "Draft for" control: a pitch dropdown stacked above a [Draft for]
- * button + a thread-count dropdown, plus a small feedback line. The pitch list is
- * fetched through the SW; the button is disabled until pitches are loaded.
+ * Build the "Draft for" control: a customer dropdown stacked above a [Draft for]
+ * button + a thread-count dropdown, plus a small feedback line. The customer list is
+ * fetched through the SW; the button is disabled until customers are loaded.
  */
 export function buildDraftControl(): HTMLElement {
   const root = el("div", "cp-draft-control");
   const feedback = el("div", "cp-draft-feedback");
   feedback.setAttribute("role", "status");
 
-  const pitch = el("select", "cp-draft-pitch");
-  // Each prospect is drafted from their OWN pitch (resolved per conversation in
-  // runCycle); this dropdown is the fallback for threads whose person isn't a
-  // prospect yet.
-  pitch.title = "Fallback pitch — used only for people who aren't prospects yet";
-  pitch.disabled = true;
+  // The loaded profiles, kept so a pick can be remembered by id AND name.
+  let customers: Customer[] = [];
+
+  const customer = el("select", "cp-draft-customer");
+  // Each prospect is steered by their OWN customer profile (resolved per
+  // conversation in runCycle); this dropdown is the fallback for threads whose
+  // person isn't a prospect yet.
+  customer.title =
+    "Fallback customer profile — used only for people who aren't prospects yet";
+  customer.disabled = true;
 
   const row = el("div", "cp-draft-row");
   const button = el("button", "cp-draft-btn");
@@ -88,7 +93,7 @@ export function buildDraftControl(): HTMLElement {
   count.value = String(DEFAULT_COUNT);
 
   row.append(button, count);
-  root.append(pitch, row, feedback);
+  root.append(customer, row, feedback);
 
   let feedbackTimer: number | undefined;
   function showFeedback(kind: "info" | "success" | "error", text: string, sticky = false): void {
@@ -113,62 +118,71 @@ export function buildDraftControl(): HTMLElement {
     void chrome.storage.local.set({ [LAST_COUNT_KEY]: Number(count.value) }).catch(() => {});
   });
 
-  // Load pitches into the dropdown.
+  // Load customers into the dropdown.
   void (async () => {
-    const res = await send<Pitch[]>({ type: "listPitches" });
+    const res = await send<Customer[]>({ type: "listCustomers" });
     if (!res.ok) {
       const opt = el("option");
       opt.textContent = "—";
-      pitch.append(opt);
+      customer.append(opt);
       showFeedback("error", friendlyError(res.error));
       return;
     }
-    if (res.data.length === 0) {
-      const opt = el("option");
-      opt.textContent = "No pitches yet";
-      pitch.append(opt);
-      pitch.title = "Create a pitch in Courland first.";
-      return;
-    }
+    customers = res.data;
+    // "No profile" is always offered, and is the only option when none are
+    // defined. Drafting without one is legitimate — the reply is composed from the
+    // product and snippets, it just has no goal to aim at — so a fresh install can
+    // draft before any customer profiles exist.
+    const none = el("option");
+    none.value = "";
+    none.textContent = res.data.length === 0 ? "No profile yet" : "No profile";
+    customer.append(none);
     for (const p of res.data) {
       const opt = el("option");
       opt.value = String(p.id);
       opt.textContent = p.name;
-      pitch.append(opt);
+      customer.append(opt);
     }
-    pitch.disabled = false;
+    if (res.data.length === 0) {
+      customer.title =
+        "Add customer profiles in Courland to steer drafts toward a goal.";
+    }
+    customer.disabled = false;
     button.disabled = false;
 
-    const stored = await chrome.storage.local
-      .get(LAST_PITCH_KEY)
-      .catch(() => ({}) as Record<string, unknown>);
-    const last = stored[LAST_PITCH_KEY] as number | undefined;
-    if (last != null && res.data.some((p) => p.id === last)) pitch.value = String(last);
+    const last = await recallCustomerId(res.data);
+    if (last != null) customer.value = String(last);
   })();
 
   button.addEventListener("click", async () => {
-    const pitchId = pitch.value ? Number(pitch.value) : NaN;
-    if (!Number.isFinite(pitchId)) {
-      showFeedback("error", "Pick a pitch first.");
-      return;
-    }
+    // An empty value is the "No profile" option — a deliberate choice, not a
+    // missing one, so it drafts without a goal rather than erroring.
+    const picked = customer.value ? Number(customer.value) : null;
+    const customerId = picked != null && Number.isFinite(picked) ? picked : null;
     const n = Number(count.value) || DEFAULT_COUNT;
 
     button.disabled = true;
     button.dataset.busy = "true";
     try {
-      void chrome.storage.local.set({ [LAST_PITCH_KEY]: pitchId }).catch(() => {});
+      rememberCustomer(customers.find((c) => c.id === customerId) ?? null);
       // Cycle from whatever conversation is selected right now: draft for it and
       // the N-1 below it. The cycle runs in THIS tab (the inbox), opening each
       // conversation in the reading pane to scrape it — the pane visibly steps
       // through them — and opens a pre-filled review tab as each draft is ready.
-      await runCycle(pitchId, n, selectedRowIndex(), (p) => {
-        if (p.done) {
+      await runCycle(customerId, n, selectedRowIndex(), (p) => {
+        if (!p.done) {
+          showFeedback("info", `Scanning conversations… ${p.ready} ready`, true);
+        } else if (p.blocked) {
+          // A setup problem, not a drafting one — say what to fix rather than
+          // reporting a run that "finished" with nothing to show for it.
+          showFeedback(
+            "error",
+            "Nothing to draft from yet — add your product, profile, or snippets in Courland.",
+          );
+        } else {
           const bits = [`${p.ready} draft${p.ready === 1 ? "" : "s"} ready`];
           if (p.failed > 0) bits.push(`${p.failed} skipped`);
           showFeedback("success", `Done — ${bits.join(", ")}. Tabs open as they're ready.`);
-        } else {
-          showFeedback("info", `Scanning conversations… ${p.ready} ready`, true);
         }
       });
     } catch {
@@ -210,6 +224,10 @@ interface CycleProgress {
   failed: number;
   /** Whether the whole cycle (including outstanding generations) has finished. */
   done: boolean;
+  /** The app has nothing to draft from (no product description, no profile, no
+   *  snippets), so the run stopped early. Not a per-conversation failure — it's a
+   *  setup problem, and the control says so instead of reporting skips. */
+  blocked: boolean;
 }
 
 /**
@@ -219,12 +237,14 @@ interface CycleProgress {
  * concurrently (server-capped). Each resolved draft is cached by thread URL and a
  * pre-filled review tab is opened for it. Resolves once every generation settles.
  *
- * Each conversation is drafted from ITS prospect's own pitch (looked up by URL in
- * generateAndQueue); `fallbackPitchId` is used only for threads whose person isn't
- * a prospect yet — so a mixed batch never builds a reply from the wrong library.
+ * Each conversation is steered by ITS prospect's own customer profile (looked up by
+ * URL in generateAndQueue); `fallbackCustomerId` applies only to threads whose person
+ * isn't a prospect yet — so a mixed batch never aims a reply at the wrong buyer's
+ * goal. It may be null (no profiles defined, or none picked), which drafts from the
+ * product and snippets without a goal rather than refusing.
  */
 export async function runCycle(
-  fallbackPitchId: number,
+  fallbackCustomerId: number | null,
   count: number,
   start: number,
   report: (p: CycleProgress) => void,
@@ -243,6 +263,10 @@ export async function runCycle(
 
   let ready = 0;
   let failed = 0;
+  // Set when the app reports it has no material to draft from. Every remaining
+  // conversation would come back the same, so stop walking the list rather than
+  // spending the rest of the batch to learn it 19 more times.
+  let blocked = false;
   // Conversations that rendered but never confirmed as open, back to back. A few in
   // a row means something structural changed rather than isolated lag — bail then.
   let consecutiveUnconfirmed = 0;
@@ -251,9 +275,12 @@ export async function runCycle(
   // give up if it's still broken.
   let healedThreadSelectors = false;
   const pending: Promise<void>[] = [];
-  const tick = (done: boolean): void => report({ ready, failed, done });
+  const tick = (done: boolean): void => report({ ready, failed, done, blocked });
 
   for (let i = 0; i < count; i++) {
+    // A generation already came back "nothing configured to draft from" — the rest
+    // of the batch can only repeat it. Stop opening conversations.
+    if (blocked) break;
     const index = start + i;
     const outcome = await openConversationAt(index, Date.now() + OPEN_PHASE_MS);
     // The row never rendered even after scrolling — the inbox has fewer
@@ -302,15 +329,18 @@ export async function runCycle(
     }));
     const name = thread.name;
     // Two different URL namespaces here: `thread.url` is the person's PROFILE url
-    // (/in/<slug>/ — how prospects are keyed, so the pitch lookup must use it),
+    // (/in/<slug>/ — how prospects are keyed, so the customer lookup must use it),
     // while `url` is the THREAD url (/messaging/thread/<id>/ — how the draft cache
     // and review tab are keyed). Passing the thread url to the lookup would never
-    // match a prospect, silently collapsing every draft onto the fallback pitch.
-    const p = generateAndQueue(fallbackPitchId, thread.url, url, name, messages).then((ok) => {
-      if (ok) ready += 1;
-      else failed += 1;
-      tick(false);
-    });
+    // match a prospect, silently collapsing every draft onto the fallback customer.
+    const p = generateAndQueue(fallbackCustomerId, thread.url, url, name, messages).then(
+      (outcome) => {
+        if (outcome === "ready") ready += 1;
+        else if (outcome === "failed") failed += 1;
+        else blocked = true;
+        tick(false);
+      },
+    );
     pending.push(p);
     tick(false);
   }
@@ -320,43 +350,56 @@ export async function runCycle(
   tick(true);
 }
 
+/** What became of one conversation's generation. `blocked` is not this thread's
+ *  failure — the app has no material to draft from at all, so every remaining
+ *  conversation would come back identically and the run should stop. */
+type GenerateOutcome = "ready" | "failed" | "blocked";
+
 /** Generate one conversation's draft, cache it by URL, and ask the SW to open a
- *  pre-filled review tab for it. The pitch is resolved per conversation from the
- *  person's PROFILE url (`profileUrl`) — the thread's prospect's own pitch,
- *  falling back to `fallbackPitchId` for a non-prospect — so a mixed batch never
- *  drafts from the wrong snippet library. The draft cache and review tab are keyed
- *  by the THREAD url (`threadUrl`), which is what the review tab peeks by. The
- *  cache write completes BEFORE the tab is asked to open, so the draft is present
- *  the moment that tab loads. Returns whether a draft was produced. */
+ *  pre-filled review tab for it. The customer profile is resolved per conversation
+ *  from the person's PROFILE url (`profileUrl`) — the thread's prospect's own
+ *  profile, falling back to `fallbackCustomerId` for a non-prospect — so a mixed
+ *  batch never aims a reply at the wrong buyer's goal. The draft cache and review
+ *  tab are keyed by the THREAD url (`threadUrl`), which is what the review tab peeks
+ *  by. The cache write completes BEFORE the tab is asked to open, so the draft is
+ *  present the moment that tab loads. */
 async function generateAndQueue(
-  fallbackPitchId: number,
+  fallbackCustomerId: number | null,
   profileUrl: string,
   threadUrl: string,
   name: string,
   messages: DraftMessageInput[],
-): Promise<boolean> {
-  const pitchId = await resolvePitchForThread(profileUrl, fallbackPitchId);
+): Promise<GenerateOutcome> {
+  const customerId = await resolveCustomerForThread(profileUrl, fallbackCustomerId);
   const res = await send<DraftResult>({
     type: "draftReply",
-    payload: { prospect_name: name, pitch_id: pitchId, messages },
+    payload: { prospect_name: name, customer_id: customerId, messages },
   });
-  if (!res.ok) return false;
+  if (!res.ok) return "failed";
+  // Nothing configured to draft from. The app answers 200 with an ALL-CAPS
+  // explanation so a single manual draft shows it in the composer, but a batch
+  // must not: it would paste that sentence into every open conversation, and
+  // LinkedIn keeps composer drafts server-side. Don't cache it, don't open a tab.
+  if (res.data.blocked) return "blocked";
   await putDraft(DRAFT_NS_REPLY, threadUrl, res.data.draft);
   await send({ type: "openReviewTab", payload: { url: threadUrl } });
-  return true;
+  return "ready";
 }
 
-/** The pitch to draft this person's reply from: their own prospect pitch when
- *  they're tracked (so the reply is built from the right library), else the batch
- *  fallback. `profileUrl` must be the /in/<slug>/ profile url — the key prospects
- *  are stored under. A prospect on a since-deleted pitch (pitch_id null) or a
- *  failed lookup both fall back — drafting must never be blocked by the lookup. */
-async function resolvePitchForThread(profileUrl: string, fallback: number): Promise<number> {
+/** The customer profile to steer this person's reply toward: their own when they're
+ *  tracked and matched, else the batch fallback. `profileUrl` must be the
+ *  /in/<slug>/ profile url — the key prospects are stored under. An unassigned
+ *  prospect (customer_id null) or a failed lookup both fall back — drafting must
+ *  never be blocked by the lookup, and a null fallback is itself valid. */
+async function resolveCustomerForThread(
+  profileUrl: string,
+  fallback: number | null,
+): Promise<number | null> {
   const res = await send<ProspectLookup>({
     type: "lookupProspect",
     payload: { linkedin_url: profileUrl },
   });
-  if (res.ok && res.data.exists && res.data.pitch_id != null) return res.data.pitch_id;
+  if (res.ok && res.data.exists && res.data.customer_id != null) return res.data.customer_id;
   return fallback;
 }
 

@@ -1,4 +1,4 @@
-// Builds the "[Pitch ▼] [Add to Prospects]" cluster injected as its own row
+// Builds the "[Customer ▼] [Add to Prospects]" cluster injected as its own row
 // below the message text area (above LinkedIn's send row — placement lives in
 // main.ts), plus the floating feedback element above it. All network work is
 // delegated to the service worker; this file is pure DOM + interaction.
@@ -15,11 +15,11 @@ import { el } from "./dom";
 import { IDENTITY_KEYS, MESSAGE_KEYS, requestHeal } from "./heal";
 import { selStr } from "./selectors";
 import { showToast, type ToastKind } from "./toast";
-import { LAST_PITCH_KEY } from "../lib/storageKeys";
+import { recallCustomerId, rememberCustomer } from "../lib/lastCustomer";
 import type {
   AddProspectResult,
   CaptureOutcome,
-  Pitch,
+  Customer,
   ProspectLookup,
   Response,
 } from "../lib/types";
@@ -189,6 +189,13 @@ function setupCapture(composeRoot: HTMLElement): { resync: () => void } {
   return { resync };
 }
 
+/** The customer picker has no visible `<label>`, so this is also its accessible
+ *  name. It says what the choice MEANS: a customer profile is the kind of buyer
+ *  this person already is, which is what steers their drafts — not something you
+ *  run at them. (The pitch-era wording was "Customer to run on this prospect",
+ *  right for a pitch and backwards for an ICP.) Matches the "Draft for" control. */
+const PICKER_TITLE = "Which kind of buyer is this? Steers their drafts.";
+
 /** Build the widget for one compose bar. `sendBtn` scopes the conversation for
  *  identity/capture; it does not affect where the row is placed. */
 export function buildWidget(sendBtn: Element): HTMLElement {
@@ -198,11 +205,11 @@ export function buildWidget(sendBtn: Element): HTMLElement {
   const feedback = el("div", "cp-feedback");
   feedback.setAttribute("role", "status");
   const select = el("select", "cp-select");
-  select.title = "Pitch to run on this prospect";
+  select.title = PICKER_TITLE;
   const button = el("button", "cp-add");
   button.type = "button";
   button.textContent = "Add to Prospects";
-  button.disabled = true; // enabled once pitches + identity are ready
+  button.disabled = true; // enabled once customers + identity are ready
   // Read-only status shown instead of the add cluster once this person is already
   // a prospect (see refreshProspectStatus). Hidden until a lookup confirms it.
   const label = el("div", "cp-prospect-of");
@@ -210,12 +217,15 @@ export function buildWidget(sendBtn: Element): HTMLElement {
 
   root.append(feedback, select, button, label);
 
-  // The pitch list, cached once loaded so a prospect-status lookup can resolve a
-  // pitch id to its name (the lookup returns only the id).
-  let pitches: Pitch[] = [];
-  function pitchName(id: number | null): string | null {
+  // The customer list, cached once loaded so a prospect-status lookup can resolve a
+  // customer id to its name (the lookup returns only the id).
+  let customers: Customer[] = [];
+  // Whether the list request has come back at all (either way). Gates the add
+  // button — see syncDisabled.
+  let listLoaded = false;
+  function customerName(id: number | null): string | null {
     if (id == null) return null;
-    return pitches.find((p) => p.id === id)?.name ?? null;
+    return customers.find((p) => p.id === id)?.name ?? null;
   }
 
   let feedbackTimer: number | undefined;
@@ -245,21 +255,30 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     syncDisabled();
   }
 
+  // Capture only needs a person. A customer profile is steering, not a
+  // requirement — an unassigned prospect is a valid resting state (they're in the
+  // pipeline, their drafts just get no goal), so having NONE never blocks adding.
+  //
+  // Not knowing yet is different from knowing there are none, though: until the
+  // list resolves, the picker can't show a choice the user might want to make, and
+  // capturing them right then silently files them unassigned. So wait for the
+  // answer (`listLoaded`) — including the error case, where the answer is "we
+  // couldn't ask" and adding blind is the wrong default.
   function syncDisabled(): void {
-    const hasPitches = select.options.length > 0 && !select.disabled;
-    button.disabled = !hasPitches || button.dataset.identifiable !== "true";
+    button.disabled = !listLoaded || button.dataset.identifiable !== "true";
   }
 
-  // Put the select into a single disabled placeholder state (no pitches usable).
+  // Put the select into a single disabled placeholder state (no profiles to pick).
   function setPlaceholder(text: string): void {
     select.disabled = true;
     const opt = el("option");
+    opt.value = "";
     opt.textContent = text;
     select.append(opt);
     syncDisabled();
   }
 
-  // Show the "[Pitch ▾] [Add to Prospects]" cluster (the default: this person
+  // Show the "[Customer ▾] [Add to Prospects]" cluster (the default: this person
   // isn't a prospect yet, or we couldn't determine it — never block adding).
   function showAddMode(): void {
     label.hidden = true;
@@ -268,12 +287,17 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     refreshIdentityState();
   }
 
-  // Show the read-only "Prospect of <pitch>" status instead of the add cluster.
-  // Falls back to a generic label when the pitch is unknown (deleted, or not in
-  // the loaded list).
-  function showProspectMode(pitchId: number | null): void {
-    const name = pitchName(pitchId);
-    label.textContent = name ? `Prospect of ${name}` : "Already a prospect";
+  // Show the read-only "Prospect · <customer>" status instead of the add cluster.
+  // Falls back to "no profile" when they're unassigned, or their profile isn't in
+  // the loaded list (deleted since) — both are ordinary states, not errors.
+  //
+  // Both variants state the same kind of fact ("they're a prospect, here's their
+  // profile"), which matters because this also renders immediately after a
+  // successful add: the earlier "Already a prospect" read as a correction of the
+  // "Added ✓" toast still on screen above it.
+  function showProspectMode(customerId: number | null): void {
+    const name = customerName(customerId);
+    label.textContent = name ? `Prospect · ${name}` : "Prospect · no profile";
     select.hidden = true;
     button.hidden = true;
     label.hidden = false;
@@ -285,7 +309,7 @@ export function buildWidget(sendBtn: Element): HTMLElement {
 
   // Decide which face the widget shows for the CURRENTLY open thread: if its
   // person is already a prospect, the read-only label; otherwise the add cluster.
-  // Runs on mount (after pitches load) and on every thread switch (cp:rescan) —
+  // Runs on mount (after customers load) and on every thread switch (cp:rescan) —
   // the compose root and this widget persist across switches, so a mount-only
   // check would go stale the moment you open another conversation.
   async function refreshProspectStatus(): Promise<void> {
@@ -304,7 +328,7 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     // A newer refresh started (the user switched threads mid-flight) — drop this.
     if (token !== statusToken) return;
     if (res.ok && res.data.exists) {
-      showProspectMode(res.data.pitch_id);
+      showProspectMode(res.data.customer_id);
     } else {
       // Not a prospect, or the lookup failed (app closed) — show the add cluster
       // either way so the user is never blocked from adding them.
@@ -312,41 +336,69 @@ export function buildWidget(sendBtn: Element): HTMLElement {
     }
   }
 
-  // Load pitches for the dropdown (fresh each time a chat's widget mounts).
-  void (async () => {
-    const res = await send<Pitch[]>({ type: "listPitches" });
+  /** (Re)populate the dropdown from the app, preserving the current pick when it
+   *  survives the refresh.
+   *
+   *  Re-runnable, not mount-once: this widget outlives every thread switch, and a
+   *  LinkedIn tab commonly stays open for hours while profiles are created and
+   *  deleted in the app. Left as a one-shot, someone who added their first profile
+   *  mid-session would keep capturing people unassigned against a picker that never
+   *  offered the choice. */
+  async function loadCustomers(): Promise<void> {
+    const res = await send<Customer[]>({ type: "listCustomers" });
+    const previous = select.value;
+    select.replaceChildren();
+
     if (!res.ok) {
+      listLoaded = false;
       setPlaceholder("—");
       showFeedback("error", friendlyError(res.error));
       return;
     }
-    pitches = res.data;
+
+    customers = res.data;
+    listLoaded = true;
+
     if (res.data.length === 0) {
-      setPlaceholder("No pitches yet");
-      button.title = "Create a pitch in Courland first.";
-      // A prospect on a since-deleted pitch can still exist with no pitches left.
-      void refreshProspectStatus();
+      setPlaceholder("No profile yet");
+      // Capture still works — they land unassigned. Note this is a title on a
+      // DISABLED select, which Chrome won't surface on hover; it's here for
+      // assistive tech, and the app's own empty state is the real explanation.
+      select.title = "Add customer profiles in Courland to steer drafts toward a goal.";
       return;
     }
-    for (const pitch of res.data) {
+
+    select.disabled = false;
+    // Restore the normal label — a previous refresh may have left the empty-state
+    // explanation on it.
+    select.title = PICKER_TITLE;
+    // "No profile" leads the list: capturing someone you haven't classified yet is
+    // normal, and forcing a guess would put wrong steering on real drafts.
+    const none = el("option");
+    none.value = "";
+    none.textContent = "No profile";
+    select.append(none);
+    for (const customer of res.data) {
       const opt = el("option");
-      opt.value = String(pitch.id);
-      opt.textContent = pitch.name;
+      opt.value = String(customer.id);
+      opt.textContent = customer.name;
       select.append(opt);
     }
-    // Pre-select the last-used pitch, if it's still in the list. Storage can
-    // reject on a torn-down extension context — degrade to "no pre-selection"
-    // (never let it reject unhandled, and still fall through to syncDisabled).
-    const stored = await chrome.storage.local.get(LAST_PITCH_KEY).catch(() => ({}) as Record<string, unknown>);
-    const last = stored[LAST_PITCH_KEY] as number | undefined;
-    if (last != null && res.data.some((p) => p.id === last)) {
-      select.value = String(last);
+
+    // Keep an in-progress pick across a refresh; otherwise fall back to the
+    // last-used profile, if that exact one is still around.
+    if (previous && res.data.some((c) => String(c.id) === previous)) {
+      select.value = previous;
+    } else {
+      const last = await recallCustomerId(res.data);
+      if (last != null) select.value = String(last);
     }
     syncDisabled();
-    // Pitches are loaded, so a lookup can now resolve the pitch name — decide
-    // whether this thread's person is already a prospect.
-    void refreshProspectStatus();
-  })();
+  }
+
+  // Mount: load the list, then decide which face this thread's person gets (the
+  // status lookup runs after, so it can resolve a customer id to its name).
+  void loadCustomers().then(() => refreshProspectStatus());
 
   refreshIdentityState();
 
@@ -360,9 +412,16 @@ export function buildWidget(sendBtn: Element): HTMLElement {
 
   // A thread open/switch keeps this widget mounted (the compose root persists), so
   // re-check prospect status for the newly-visible thread — otherwise the label
-  // would keep showing the previous person's pitch. main.ts fires cp:rescan on
+  // would keep showing the previous person's customer. main.ts fires cp:rescan on
   // SPA navigation. (One listener: main.ts mounts one widget per compose root.)
-  composeRoot.addEventListener("cp:rescan", () => void refreshProspectStatus());
+  // Refresh the profile list on the same beat. A thread switch is the natural
+  // moment to re-ask: it's frequent, it's already doing a round-trip, and it's
+  // what recovers a widget whose list failed to load (app closed at mount) or went
+  // stale (a profile added since) without making the user reload LinkedIn.
+  composeRoot.addEventListener(
+    "cp:rescan",
+    () => void loadCustomers().then(() => refreshProspectStatus()),
+  );
 
   button.addEventListener("click", async () => {
     let result = identify(scope);
@@ -381,7 +440,7 @@ export function buildWidget(sendBtn: Element): HTMLElement {
       return;
     }
 
-    const pitchId = select.value ? Number(select.value) : null;
+    const customerId = select.value ? Number(select.value) : null;
     button.disabled = true;
     button.dataset.busy = "true";
     try {
@@ -390,28 +449,39 @@ export function buildWidget(sendBtn: Element): HTMLElement {
         payload: {
           name: result.identity.name,
           linkedin_url: result.identity.url,
-          pitch_id: pitchId,
+          customer_id: customerId,
         },
       });
       if (!res.ok) {
         showFeedback("error", friendlyError(res.error));
         return;
       }
-      if (pitchId != null) {
-        // Best-effort; swallow a torn-down-context rejection.
-        void chrome.storage.local.set({ [LAST_PITCH_KEY]: pitchId }).catch(() => {});
-      }
+      rememberCustomer(customers.find((c) => c.id === customerId) ?? null);
       // Now that they're a prospect, backfill the visible thread's messages.
       capture.resync();
+      // Say what actually happened rather than a generic "updated". Re-adding
+      // someone at "No profile" deliberately leaves their existing profile alone
+      // (the server COALESCEs), so claiming an update there would be false — and
+      // read as a benign explanation if it had in fact wiped something.
+      const saved = res.data.prospect.customer_id;
+      const savedName = customerName(saved);
       showFeedback(
         res.data.existed ? "info" : "success",
-        res.data.existed ? "Already a prospect — pitch updated." : "Added to Prospects ✓",
+        !res.data.existed
+          ? savedName
+            ? `Added to Prospects ✓ — ${savedName}`
+            : "Added to Prospects ✓ — no profile"
+          : customerId != null && savedName
+            ? `Already a prospect — profile set to ${savedName}.`
+            : "Already a prospect.",
       );
       // They're a prospect now — swap the add cluster for the read-only status.
       // Invalidate any refresh started before the add (its in-flight lookup was
       // issued when they weren't a prospect and would revert us to the add cluster).
+      // Trust the returned row, not the local pick: the server drops a profile that
+      // was deleted since, and preserves the existing one on a "No profile" re-add.
       statusToken++;
-      showProspectMode(res.data.prospect.pitch_id ?? pitchId);
+      showProspectMode(saved);
     } finally {
       delete button.dataset.busy;
       syncDisabled();

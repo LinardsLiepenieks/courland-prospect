@@ -1,7 +1,16 @@
-/** `chrome.storage.local` keys shared across content surfaces. Centralized so
- *  the capture widget and the "Draft for" control can't drift apart on the key
- *  and silently stop sharing the user's last-picked pitch. */
-export const LAST_PITCH_KEY = "lastPitchId";
+/** `chrome.storage.local` key holding the user's last-picked customer profile,
+ *  as `{ id, name }`. Shared by the capture widget and the "Draft for" control.
+ *  Read and write it through `lib/lastCustomer` rather than directly — the
+ *  id-plus-name matching there is what keeps a recycled rowid from pre-selecting
+ *  the wrong profile. */
+export const LAST_CUSTOMER_KEY = "lastCustomerId";
+
+/** The pre-rework name for the same preference, back when the picker chose a
+ *  *pitch*. Read once and migrated (see `recallCustomerId`) rather than
+ *  abandoned: migration 0023 turned each pitch into a customer profile keeping
+ *  its id, so the stored value still names the same row — and every reader
+ *  revalidates it against the live list anyway. */
+export const LEGACY_LAST_PITCH_KEY = "lastPitchId";
 
 /** URL-hash marker the review-tab queue appends to a thread URL, and the content
  *  script keys off to know a tab was opened to be pre-filled with a cached draft
