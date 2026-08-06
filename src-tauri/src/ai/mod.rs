@@ -22,6 +22,7 @@ pub(crate) mod parse;
 pub mod prompt;
 
 pub use prompt::{
-    comment_is_skip, BrokenSelector, ClassifyContext, CommentContext, DraftContext, DraftCustomer,
-    DraftMessage, DraftSnippet, Prompt, ProposeContext, ReviewContext,
+    comment_is_skip, AdvanceContext, BrokenSelector, ClassifyContext, CommentContext, DedupContext,
+    DraftContext, DraftCustomer, DraftMessage, DraftSnippet, DraftStage, Prompt, ProposeContext,
+    ReviewContext,
 };
