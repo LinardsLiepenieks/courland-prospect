@@ -1,0 +1,31 @@
+-- v29 — a second axis on a snippet: what it's ABOUT.
+--
+-- `category` (0017) holds the conversation STAGE — where on the arc a line belongs
+-- (Opener, Objection, Calling to meet …). That answers *when* to say something and
+-- stays the primary axis: it's what the library groups by, what the user edits by
+-- hand, and what orders a draft's material.
+--
+-- `topic` is orthogonal to it and answers *what about* — Security, Pricing,
+-- Integrations, Hiring. The two genuinely cross: "we're SOC2 Type II certified" and
+-- "worth 15 minutes to walk through our controls?" share a topic and sit at opposite
+-- ends of the arc, while an Objection snippet about price and one about trust share a
+-- stage and nothing else.
+--
+-- Why it's worth storing rather than inferring at draft time: it lets a reply prefer
+-- CONTINUITY. A thread that has been about integrations should usually keep being about
+-- integrations, and without a topic tag the composer has no way to see that two of its
+-- candidate lines belong to the same thread of conversation and a third changes the
+-- subject. The preference is deliberately soft — see the TOPIC rule in
+-- `ai::prompt::DRAFT_INSTRUCTION`, which lets the model change subject when the thread
+-- gives it a reason to.
+--
+-- AI-derived, and unlike `category` it has no `manual` counterpart: the user pins a
+-- stage by hand, never a topic (see `features::snippets::classify`). It is also
+-- deliberately NOT canonical — there is no fixed list and no anchor value, because a
+-- topic is whatever this founder happens to talk about. Empty means "no clear subject",
+-- which is a normal answer for a line like "worth a quick call?".
+--
+-- Empty default, so every existing row reads as untopiced until the next classify pass
+-- (or the "Organize library" button) fills it in. Nothing reads `topic` as a required
+-- value, so an un-backfilled library behaves exactly as it did before.
+ALTER TABLE snippets ADD COLUMN topic TEXT NOT NULL DEFAULT '';

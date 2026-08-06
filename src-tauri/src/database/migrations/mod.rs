@@ -38,6 +38,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("0024_one_pipeline.sql"),
     include_str!("0025_prospects_customer.sql"),
     include_str!("0026_one_snippet_library.sql"),
+    include_str!("0027_stage_goals.sql"),
+    include_str!("0028_prospect_cycle_state.sql"),
+    include_str!("0029_snippet_topic.sql"),
 ];
 
 /// Apply every migration newer than the database's current `user_version`,
@@ -640,5 +643,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stage, "Meeting", "position 3 clamps to the surviving pipeline's last stage");
+    }
+
+    /// The cycle migration (0028) must derive `last_outreach_at` from the threads
+    /// already captured, so an existing board shows true staleness on the first
+    /// launch after the upgrade. Only OUTGOING messages count — the column means
+    /// "when did YOU last reach out", so a prospect who has only ever written to
+    /// us must still read as never-contacted (NULL).
+    #[test]
+    fn cycle_migration_backfills_last_outreach_from_outgoing_messages_only() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        // Everything up to (but not including) 0027 — the stage-goal migration is
+        // index 26, so 0028 is index 27.
+        for sql in &MIGRATIONS[..26] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 26i64).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO prospects (id, name, linkedin_url) VALUES
+                (1, 'Messaged',   'https://li/a'),
+                (2, 'OnlyReplied','https://li/b'),
+                (3, 'Untouched',  'https://li/c'),
+                (4, 'Backfilled', 'https://li/d');
+             INSERT INTO messages (prospect_id, li_key, direction, created_at, sent_at) VALUES
+                (1, 'k1', 'outgoing', '2026-07-01 10:00:00', NULL),
+                (1, 'k2', 'outgoing', '2026-07-09 10:00:00', NULL),
+                (1, 'k3', 'incoming', '2026-07-20 10:00:00', NULL),
+                (2, 'k4', 'incoming', '2026-07-15 10:00:00', NULL),
+                -- A thread captured in one batch today but actually sent months
+                -- ago: the shape a first capture always produces.
+                (4, 'k5', 'outgoing', '2026-08-03 09:00:00', '2026-05-01T09:00:00.000Z'),
+                (4, 'k6', 'outgoing', '2026-08-03 09:00:00', '2026-05-04T11:30:00.000Z');",
+        )
+        .unwrap();
+
+        run(&mut conn).unwrap();
+
+        let last = |id: i64| -> Option<String> {
+            conn.query_row(
+                "SELECT last_outreach_at FROM prospects WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            last(1).as_deref(),
+            Some("2026-07-09 10:00:00"),
+            "the NEWEST outgoing message wins, and their later reply doesn't count as outreach"
+        );
+        assert_eq!(last(2), None, "an inbound-only thread is still no outreach from us");
+        assert_eq!(last(3), None, "never messaged → NULL, and the UI ages them from created_at");
+        assert_eq!(
+            last(4).as_deref(),
+            Some("2026-05-04 11:30:00"),
+            "a thread backfilled in one capture must age from when it was SENT — reading \
+             the capture time would grade a months-old conversation as messaged today"
+        );
+
+        // 0027's stage columns land with the built-in cadence, so an untouched
+        // pipeline behaves sensibly before the user edits anything.
+        let (goal, warn, stale): (String, i64, i64) = conn
+            .query_row(
+                "SELECT goal, warn_days, stale_days FROM stages ORDER BY position LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((goal.as_str(), warn, stale), ("", 3, 7));
+    }
+
+    /// A pending suggestion must retract itself when its target stage is deleted,
+    /// rather than stranding a card offering a move into a column that's gone.
+    #[test]
+    fn deleting_a_stage_retracts_a_suggestion_pointing_at_it() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run(&mut conn).unwrap();
+
+        let target: i64 = conn
+            .query_row("SELECT id FROM stages ORDER BY position LIMIT 1 OFFSET 1", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO prospects (name, linkedin_url, suggested_stage_id, suggested_reason)
+             VALUES ('Ada', 'https://li/ada', ?1, 'they asked for a call')",
+            [target],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM stages WHERE id = ?1", [target]).unwrap();
+
+        let suggested: Option<i64> = conn
+            .query_row("SELECT suggested_stage_id FROM prospects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(suggested, None, "ON DELETE SET NULL retracts the stale suggestion");
     }
 }
