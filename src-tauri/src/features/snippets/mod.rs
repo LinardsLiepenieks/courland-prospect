@@ -19,6 +19,12 @@
 
 pub mod commands;
 mod model;
+// The blank (`[first name]`) syntax a snippet may carry: parsing, the shape rules,
+// the grounding check `proposals` runs a candidate through, and the dedup key that
+// sees past a blank's wording. `pub(crate)` (not private) so the ingest server can
+// keep blanked snippets out of the commenter's voice corpus — a public comment must
+// never show a bracket.
+pub(crate) mod placeholder;
 // `pub(crate)` (not private) so the ingest server can propose snippets from a
 // captured outgoing message. Turns a sent message + the existing library into
 // `proposed` rows via the local Claude Code CLI.
@@ -27,6 +33,12 @@ pub(crate) mod proposals;
 // the conversation arc (`position`) and groups it (`category`). Sibling of
 // `proposals`; both are triggered fire-and-forget and emit `SNIPPETS_CHANGED`.
 pub(crate) mod classify;
+// The redundancy search: one LLM call over the whole library, finding groups of
+// snippets that say the same thing. Runs right after `classify::reclassify_all` off
+// the same "Organize library" click. Unlike every other pass here it writes nothing —
+// it returns groups for the user to pick from, and the deleting is ordinary
+// `delete_snippet` calls.
+pub(crate) mod dedup;
 // `pub(crate)` (not private) so the ingest server can read snippets as drafting
 // material for `POST /draft` — mirrors the product slice.
 pub(crate) mod repository;

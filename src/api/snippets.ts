@@ -22,9 +22,17 @@ export interface Snippet {
   /** Where on the conversation arc this snippet sits: 0 (opener) → 1 (closing ask).
    *  AI-derived; the editor's primary sort. 0.5 until classified. */
   position: number;
-  /** A reusable group label many snippets share (empty = uncategorized). */
+  /** The conversation STAGE this snippet belongs to (empty = unstaged). The primary
+   *  axis: the library groups by it, and you can set it by hand. */
   category: string;
-  /** True when the user hand-picked the category; the AI won't re-classify it. */
+  /** What the snippet is ABOUT — "Security", "Pricing" (empty = no clear subject).
+   *  Orthogonal to `category`: that says *when* in a thread a line belongs, this says
+   *  *what about*. AI-derived and read-only — a draft uses it to prefer staying on the
+   *  subject the thread is already on, so there's no hand-set counterpart to protect. */
+  topic: string;
+  /** True when the user hand-picked the category. Covers `category` (and the `position`
+   *  that goes with it) only: the AI still tags a pinned snippet's `topic`, which is never
+   *  hand-set and so has nothing to protect. */
   manual: boolean;
   created_at: string;
 }
@@ -79,6 +87,47 @@ export function setSnippetCategory(
  *  editors reconcile in one reshuffle — this caller reloads off its own resolution. */
 export function reclassifySnippets(): Promise<number> {
   return invoke("reclassify_snippets");
+}
+
+/** One snippet in a redundancy group: which row, and the text that was judged.
+ *
+ *  Both halves matter. An id is NOT a stable name for a snippet — `snippets.id` is a
+ *  plain SQLite rowid alias, so a deleted row's id is handed to the next insert — and
+ *  the panel can sit on screen long after the report was computed. Comparing `analyzed`
+ *  against the row's current content is what lets the panel notice that a member was
+ *  edited, or that its id now names something else entirely. */
+export interface RedundancyMember {
+  id: number;
+  /** The content exactly as the AI judged it, trimmed. Compare against a live
+   *  snippet's trimmed `content` to confirm the row still says what was judged. */
+  analyzed: string;
+}
+
+/** A group of snippets the AI judges to say the same thing — one entry in the
+ *  redundancy panel. Ephemeral: the report describes the library as it is right now,
+ *  so it's held in view state and never persisted. */
+export interface RedundancyGroup {
+  /** Every snippet in the group, keeper included. Always two or more, capped at a
+   *  plausible group size, and the backend guarantees no snippet appears in more than
+   *  one group — so a row has exactly one checkbox and deleting it can't strand an
+   *  entry elsewhere. */
+  members: RedundancyMember[];
+  /** The AI's pick for the version worth keeping — always one of `members`. A
+   *  suggestion the panel pre-selects, not a decision. */
+  keep_id: number;
+  /** A brief phrase naming the point the group shares ("both state SOC2 compliance"). */
+  reason: string;
+}
+
+/** Search the approved library for snippets that say the same thing — the second half
+ *  of "Organize library", run straight after `reclassifySnippets`.
+ *
+ *  Read-only: nothing is deleted or even marked. The user picks rows from each group
+ *  and the caller deletes them with `deleteSnippet`. An empty array means the library
+ *  holds no redundancy (a real answer); a rejection means the check couldn't run, which
+ *  the caller degrades quietly since the re-score before it already applied. */
+export function findRedundantSnippets(): Promise<RedundancyGroup[]> {
+  return invoke("find_redundant_snippets");
 }
 
 /** Subscribe to backend "snippets changed" pushes — fired when a background pass

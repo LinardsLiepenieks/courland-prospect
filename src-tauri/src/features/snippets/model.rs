@@ -18,11 +18,20 @@ pub struct Snippet {
     /// → 1.0 (a closing ask). AI-derived; the primary editor sort and the order
     /// drafts compose in. 0.5 until classified.
     pub position: f64,
-    /// A reusable group label many snippets share (empty = uncategorized).
-    /// AI-derived, unless the user set it by hand (see `manual`).
+    /// The conversation STAGE this snippet belongs to — a reusable label many snippets
+    /// share (empty = unstaged). AI-derived, unless the user set it by hand (see
+    /// `manual`). The primary axis: the library groups by it and drafts order by it.
     pub category: String,
-    /// Set when the user hand-picked the category. The background classify pass
-    /// never overwrites a manual snippet.
+    /// What the snippet is ABOUT — Security, Pricing, Integrations (empty = no clear
+    /// subject). Orthogonal to `category`: that says *when* in a thread a line belongs,
+    /// this says *what about*. AI-derived with no hand-set counterpart, which is why
+    /// there's no `manual` flag for it — a draft uses it to prefer staying on the
+    /// thread's current subject.
+    pub topic: String,
+    /// Set when the user hand-picked the category. Covers `category` (and the `position`
+    /// that belongs with it) and nothing else: the background classify pass still runs on a
+    /// manual snippet and still writes its `topic`, which is never hand-set and so has
+    /// nothing to protect. Enforced per column in `repository::set_classification`.
     pub manual: bool,
     pub created_at: String,
 }
@@ -37,6 +46,7 @@ impl Snippet {
             status: row.get("status")?,
             position: row.get("position")?,
             category: row.get("category")?,
+            topic: row.get("topic")?,
             manual: row.get("manual")?,
             created_at: row.get("created_at")?,
         })

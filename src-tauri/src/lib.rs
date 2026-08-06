@@ -89,6 +89,7 @@ pub fn run() {
             features::snippets::commands::approve_snippet,
             features::snippets::commands::set_snippet_category,
             features::snippets::commands::reclassify_snippets,
+            features::snippets::commands::find_redundant_snippets,
             features::watchlist::commands::list_watched_profiles,
             features::watchlist::commands::add_watched_profile,
             features::watchlist::commands::delete_watched_profile,

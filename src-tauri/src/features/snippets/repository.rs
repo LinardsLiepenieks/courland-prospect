@@ -10,7 +10,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::model::Snippet;
 
-const COLUMNS: &str = "id, name, content, status, position, category, manual, created_at";
+const COLUMNS: &str =
+    "id, name, content, status, position, category, topic, manual, created_at";
 
 /// A normal, usable snippet: editable and available to compose drafts.
 pub(crate) const APPROVED: &str = "approved";
@@ -67,6 +68,20 @@ pub(crate) fn existing_categories(conn: &Connection) -> rusqlite::Result<Vec<Str
     let mut stmt = conn.prepare(
         "SELECT DISTINCT category FROM snippets WHERE trim(category) != '' ORDER BY category",
     )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// The distinct non-empty topics already in use, for the same reason as
+/// [`existing_categories`]: showing the model what it has already called things is what
+/// stops "Security" and "security" becoming two subjects.
+///
+/// Unlike stages there is no canonical list to fall back on — a topic is whatever this
+/// founder happens to talk about — so this set IS the whole vocabulary, and keeping it
+/// tight matters more here than it does for categories.
+pub(crate) fn existing_topics(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT topic FROM snippets WHERE trim(topic) != '' ORDER BY topic")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.collect()
 }
@@ -153,20 +168,42 @@ pub(super) fn delete(conn: &Connection, id: i64) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM snippets WHERE id = ?1", [id])
 }
 
-/// Write the AI-derived classification (arc `position` + `category`) for a snippet,
-/// but ONLY when it isn't a manual row — the `manual = 0` guard is what makes the
-/// background pass unable to stomp a category the user picked by hand. Returns the
-/// updated row, or `None` when nothing matched (missing id, or a manual row left
-/// untouched). Runs under the caller's lock alongside its freshness checks.
+/// Write the AI-derived classification (arc `position`, `category` and `topic`) for a
+/// snippet, respecting a manual pin **per column**.
+///
+/// A manual pin protects the STAGE the user picked by hand, and the arc `position` that
+/// belongs with it — the background pass must not stomp either. It does NOT protect
+/// `topic`, which has no hand-set counterpart anywhere in the app: it is AI-derived and
+/// read-only by design, so there is nothing there to defend. That asymmetry is why this is
+/// three `CASE`s in one statement rather than a blanket `AND manual = 0` in the `WHERE`.
+///
+/// The blanket guard is what this used to be, and it silently made the topic axis inert for
+/// exactly the people who curate most: hand-organize a library via the stage chip and every
+/// row is pinned, so no row could ever acquire a topic, and the only path that would assign
+/// one (`force_classification`) destroys all the pins to do it. The struct's own doc comment
+/// and the TypeScript interface both already promised per-column behaviour.
+///
+/// Returns the updated row, or `None` when no row matched (missing id). Note a manual row
+/// now matches and returns `Some` — with its stage unchanged — so callers must compare the
+/// returned row against the previous one rather than treating `Some` as "something changed".
+/// Runs under the caller's lock alongside its freshness checks.
+///
+/// `topic` rides along with the stage rather than having its own writer: both come out of
+/// one classify reply, so splitting them would mean two UPDATEs for one decision.
 pub(crate) fn set_classification(
     conn: &Connection,
     id: i64,
     position: f64,
     category: &str,
+    topic: &str,
 ) -> rusqlite::Result<Option<Snippet>> {
     let changed = conn.execute(
-        "UPDATE snippets SET position = ?1, category = ?2 WHERE id = ?3 AND manual = 0",
-        params![position, category, id],
+        "UPDATE snippets SET \
+           position = CASE WHEN manual = 0 THEN ?1 ELSE position END, \
+           category = CASE WHEN manual = 0 THEN ?2 ELSE category END, \
+           topic = ?3 \
+         WHERE id = ?4",
+        params![position, category, topic, id],
     )?;
     if changed == 0 {
         return Ok(None);
@@ -185,10 +222,12 @@ pub(crate) fn force_classification(
     id: i64,
     position: f64,
     category: &str,
+    topic: &str,
 ) -> rusqlite::Result<Option<Snippet>> {
     let changed = conn.execute(
-        "UPDATE snippets SET position = ?1, category = ?2, manual = 0 WHERE id = ?3",
-        params![position, category, id],
+        "UPDATE snippets SET position = ?1, category = ?2, topic = ?3, manual = 0 \
+         WHERE id = ?4",
+        params![position, category, topic, id],
     )?;
     if changed == 0 {
         return Ok(None);
@@ -324,18 +363,20 @@ mod tests {
         update(&conn, s.id, "S", "we ship weekly").unwrap();
 
         // Auto pass classifies an un-pinned snippet.
-        let out = set_classification(&conn, s.id, 0.8, "Timeline").unwrap().unwrap();
+        let out = set_classification(&conn, s.id, 0.8, "Timeline", "").unwrap().unwrap();
         assert_eq!(out.position, 0.8);
         assert_eq!(out.category, "Timeline");
 
         // User pins a category by hand → manual.
         set_category(&conn, s.id, "Cadence").unwrap().unwrap();
 
-        // A later auto pass must NOT overwrite the manual row (returns None).
-        assert!(set_classification(&conn, s.id, 0.2, "Intro").unwrap().is_none());
-        let after = find(&conn, s.id).unwrap().unwrap();
+        // A later auto pass leaves the pinned stage and its arc position alone. It DOES
+        // match the row now (so the caller can see what the write settled on) — the pin is
+        // enforced per column, not by refusing the statement.
+        let after = set_classification(&conn, s.id, 0.2, "Intro", "").unwrap().unwrap();
         assert_eq!(after.category, "Cadence", "manual category survives the auto pass");
-        assert_eq!(after.position, 0.8, "manual guard leaves position untouched too");
+        assert_eq!(after.position, 0.8, "the pinned stage keeps its arc position too");
+        assert!(after.manual, "the pin itself is untouched");
     }
 
     #[test]
@@ -346,15 +387,15 @@ mod tests {
         set_category(&conn, s.id, "Scheduling").unwrap();
         assert!(find(&conn, s.id).unwrap().unwrap().manual);
 
-        let out = force_classification(&conn, s.id, 0.9, "Close").unwrap().unwrap();
+        let out = force_classification(&conn, s.id, 0.9, "Close", "").unwrap().unwrap();
         assert_eq!(out.position, 0.9);
         assert_eq!(out.category, "Close");
         assert!(!out.manual, "forced reclassify hands the row back to auto");
 
         // A later normal auto pass can now touch it again (no longer pinned).
-        assert!(set_classification(&conn, s.id, 0.85, "Closing").unwrap().is_some());
+        assert!(set_classification(&conn, s.id, 0.85, "Closing", "").unwrap().is_some());
 
-        assert!(force_classification(&conn, 999, 0.5, "X").unwrap().is_none());
+        assert!(force_classification(&conn, 999, 0.5, "X", "").unwrap().is_none());
     }
 
     #[test]
@@ -371,6 +412,56 @@ mod tests {
         assert!(!cleared.manual, "blanking the category un-pins it");
 
         assert!(set_category(&conn, 999, "X").unwrap().is_none());
+    }
+
+    /// Topic rides along with the stage on one write, and is NOT protected by `manual` —
+    /// the user pins a stage by hand, never a topic, so there's nothing to guard.
+    #[test]
+    fn classification_carries_a_topic_and_manual_only_protects_the_stage() {
+        let conn = setup();
+        let s = create(&conn).unwrap();
+        update(&conn, s.id, "S", "we are SOC2 certified").unwrap();
+        assert_eq!(s.topic, "", "a new snippet starts untopiced");
+
+        let out = set_classification(&conn, s.id, 0.58, "Engaged", "Security").unwrap().unwrap();
+        assert_eq!(out.category, "Engaged");
+        assert_eq!(out.topic, "Security");
+
+        // A hand-pinned stage blocks the STAGE half of a later auto write and nothing else.
+        // The topic is still written, because the user never pins a topic — it is AI-derived
+        // and read-only, so the pin has nothing to protect there. Blocking the whole row was
+        // the old behaviour, and it left a hand-organized library permanently untopiced:
+        // every row pinned, no row able to acquire a topic, and the only path that would
+        // assign one destroying all the pins to do it.
+        set_category(&conn, s.id, "Objection").unwrap().unwrap();
+        let after = set_classification(&conn, s.id, 0.2, "Warm", "Pricing").unwrap().unwrap();
+        assert_eq!(after.category, "Objection", "the hand-set stage is protected");
+        assert_eq!(after.position, 0.58, "and so is the arc position that belongs with it");
+        assert_eq!(after.topic, "Pricing", "but the topic is written — nothing to protect");
+        assert!(after.manual, "the pin itself survives");
+
+        // The force path overrides the pin and rewrites both axes.
+        let forced = force_classification(&conn, s.id, 0.72, "Objection", "Pricing")
+            .unwrap()
+            .unwrap();
+        assert_eq!(forced.topic, "Pricing");
+        assert!(!forced.manual);
+    }
+
+    #[test]
+    fn existing_topics_are_distinct_and_non_empty() {
+        let conn = setup();
+        for (stage, topic) in [("Engaged", "Security"), ("Objection", "Security"), ("Warm", "Pricing")]
+        {
+            let s = create(&conn).unwrap();
+            update(&conn, s.id, "", "x").unwrap();
+            set_classification(&conn, s.id, 0.5, stage, topic).unwrap();
+        }
+        // An untopiced snippet is excluded, and the duplicate collapses.
+        let bare = create(&conn).unwrap();
+        set_classification(&conn, bare.id, 0.5, "Warm", "").unwrap();
+
+        assert_eq!(existing_topics(&conn).unwrap(), vec!["Pricing", "Security"]);
     }
 
     #[test]
@@ -392,10 +483,10 @@ mod tests {
         let conn = setup();
         let closer = create(&conn).unwrap();
         update(&conn, closer.id, "Close", "book a call?").unwrap();
-        set_classification(&conn, closer.id, 0.9, "CTA").unwrap();
+        set_classification(&conn, closer.id, 0.9, "CTA", "").unwrap();
         let intro = create(&conn).unwrap();
         update(&conn, intro.id, "Intro", "saw your post").unwrap();
-        set_classification(&conn, intro.id, 0.1, "Opener").unwrap();
+        set_classification(&conn, intro.id, 0.1, "Opener", "").unwrap();
 
         for listed in [list(&conn).unwrap(), list_approved(&conn).unwrap()] {
             assert_eq!(listed[0].id, intro.id, "opener (low position) first");

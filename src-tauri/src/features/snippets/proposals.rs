@@ -18,27 +18,38 @@
 //! next time the user sends something new.
 //!
 //! Two hard guarantees are enforced in code, not left to the model:
-//!   - **Verbatim** — a proposal's content must appear (whitespace-normalized) in the
-//!     message the user actually sent, or it's discarded ([`is_verbatim`]).
+//!   - **Grounded in what was sent** — a proposal's content must appear
+//!     (whitespace-normalized) in the message the user actually sent, or it's
+//!     discarded. A proposal may carry BLANKS (`[first name]`) standing in for the
+//!     one detail that was welded to a single person, in which case every word
+//!     around them must still be verbatim and in order — see `placeholder`, which
+//!     owns that syntax and its shape rules.
 //!   - **No exact duplicates** — a proposal whose content already exists in the
 //!     library (any status) is skipped; the dedup read and the insert share one
 //!     connection lock, so concurrent passes can't both insert the same text
-//!     ([`run_one`]).
+//!     ([`run_one`]). The key sees past a blank's wording, so the same line doesn't
+//!     re-land each time the model names its blank differently.
 //!
 //! Between extraction and insert sits a second, best-effort LLM pass — the reviewer
 //! ([`review_candidates`]). `propose` is generative and errs toward proposing; the
-//! reviewer gates each candidate on the two axes the generator is weakest at:
-//! reusability (a line that only makes sense in one conversation is rejected) and
+//! reviewer gates each candidate on the axes the generator is weakest at:
+//! reusability (a line that only makes sense in one conversation is rejected),
 //! *semantic* duplication (a line an existing snippet already conveys, even if worded
-//! differently — which the exact-match dedup above can't catch). The reviewer is an
-//! enhancement, not a guarantee: no spare CLI capacity skips the whole pass (the
-//! phrase re-proposes next send), and an error or unparseable verdict degrades to the
-//! un-reviewed set rather than dropping good candidates.
+//! differently — which the exact-match dedup above can't catch), and whether a blank
+//! is one anything could actually fill. The reviewer is an
+//! enhancement, not a guarantee: no spare CLI capacity skips the whole pass, and so does a
+//! verdict that can't be read. Either way the phrase re-proposes on the next send.
+//!
+//! Note "skip", not "accept un-reviewed". An unreadable verdict used to fall back to the
+//! un-reviewed set on the reasoning that a reviewer hiccup shouldn't discard good material —
+//! but this gate's `None` means "no verdicts", and reading that as "keep them all" let
+//! through strictly MORE than having no reviewer at all.
 
 use std::collections::HashMap;
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use super::placeholder;
 use super::repository;
 use super::SNIPPETS_CHANGED;
 use crate::ai::{self, Prompt, ProposeContext, ReviewContext};
@@ -130,24 +141,17 @@ async fn run_one(app: &AppHandle, messages: &[String]) {
         }
     };
 
-    // Keep only proposals that are genuinely verbatim from what was sent and within
-    // bounds. The MAX_PROPOSALS cap is applied later, over the *deduped* set, so a
-    // run where several candidates already exist doesn't crowd out a genuinely-new
-    // one.
-    let candidates: Vec<(String, String)> = parse_proposals(&raw)
-        .into_iter()
-        .filter(|(_, content)| is_verbatim(messages, content))
-        .filter(|(_, content)| content.chars().count() <= MAX_TEXT_LEN)
-        .map(|(name, content)| (bound_name(&name), content))
-        .collect();
+    let candidates = select_candidates(&raw, messages);
     if candidates.is_empty() {
         return;
     }
 
     // Reviewer gate: a second LLM pass judges each candidate against the product and
-    // the existing library, rejecting one-off (conversation-specific) lines and
-    // semantic duplicates the exact-match dedup below can't catch. `None` = no spare
-    // CLI capacity, so skip the whole pass and let the phrase re-propose next send.
+    // the existing library, rejecting one-off (conversation-specific) lines, semantic
+    // duplicates the exact-match dedup below can't catch, and the two ways a blank
+    // goes wrong — asking for a detail nothing could ever fill, or hollowing the line
+    // out into a form. `None` = no spare CLI capacity, so skip the whole pass and let
+    // the phrase re-propose next send.
     let candidates =
         match review_candidates(&product_name, &product_description, &existing, candidates).await {
             Some(kept) => kept,
@@ -167,14 +171,14 @@ async fn run_one(app: &AppHandle, messages: &[String]) {
         let mut seen: Vec<String> = repository::dedup_contents(&conn)
             .map_err(|e| e.to_string())?
             .iter()
-            .map(|c| normalize_key(c))
+            .map(|c| placeholder::dedup_key(c))
             .collect();
         let mut count = 0usize;
         for (name, content) in candidates {
             if count >= MAX_PROPOSALS {
                 break; // cap the accepted (deduped) proposals, not the raw candidates
             }
-            let key = normalize_key(&content);
+            let key = placeholder::dedup_key(&content);
             if seen.contains(&key) {
                 continue; // already approved, already proposed, or a repeat in this batch
             }
@@ -198,11 +202,21 @@ async fn run_one(app: &AppHandle, messages: &[String]) {
 }
 
 /// The reviewer gate: run the extracted `candidates` through a second LLM pass and
-/// return the survivors. Returns `Some(kept)` on a decision (including `Some(vec![])`
-/// when everything was rejected), and `None` ONLY when there's no spare CLI capacity —
-/// the caller treats that as "skip, retry next send". A generation error or an
-/// unparseable verdict degrades to `Some(candidates)` (the un-reviewed set), so a
-/// reviewer hiccup never silently discards genuinely-new material.
+/// return the survivors.
+///
+/// `Some(kept)` is a decision, including `Some(vec![])` when everything was rejected.
+/// `None` means **skip the pass** — no verdict was obtained — and the caller drops the
+/// candidates rather than admitting them, so the phrase re-proposes on the next send. Two
+/// things produce it: no spare CLI capacity, and a reply whose verdict couldn't be read
+/// (unparseable, or ambiguous — `ai::parse` refuses a reply carrying two candidate arrays).
+///
+/// The one case that does NOT skip is a generation error, which still degrades to
+/// `Some(candidates)`: the pass ran and failed on its own terms, and dropping material over
+/// a transient CLI failure would make the reviewer worse than not having one.
+///
+/// Do not "restore" the un-reviewed fallback for the unreadable case. This gate's job is to
+/// remove candidates, so treating "no verdicts" as "keep them all" inverts it and lets
+/// through strictly more than having no reviewer at all.
 async fn review_candidates(
     product_name: &str,
     product_description: &str,
@@ -231,11 +245,45 @@ async fn review_candidates(
                 .filter_map(|(c, keep)| keep.then_some(c))
                 .collect(),
         ),
+        // An unreadable reply means the verdicts are UNKNOWN, and "unknown" must not
+        // resolve to "keep everything" in a gate whose entire job is to reject. Skipping
+        // (like the no-capacity path) is the safe reading: nothing is lost, because the
+        // same phrase is re-proposed and re-reviewed on the user's next send.
+        //
+        // This used to degrade to `Some(candidates)`, which was tolerable while an
+        // unreadable reply meant "no JSON at all". It stopped being tolerable once the
+        // shared parser began refusing AMBIGUOUS replies too: a reviewer that answered
+        // "reject both" and then echoed the instruction's own example now lands here, and
+        // degrading would let through strictly more than the old fail-open did.
         None => {
-            eprintln!("snippets: propose review returned no parseable verdicts; keeping candidates");
-            Some(candidates) // degrade rather than drop
+            eprintln!("snippets: propose review verdicts unreadable; skipping the pass");
+            None
         }
     }
+}
+
+/// Turn Claude's raw reply into the candidate `(name, content)` pairs worth
+/// reviewing: parsed out of the JSON, within bounds, well-formed, and grounded in
+/// what was actually sent — the whole content verbatim, or its literal text verbatim
+/// around at most a couple of blanks (see `placeholder`).
+///
+/// Note the content that comes back is `placeholder::parse`'s canonical form, not
+/// the model's raw string, so what gets stored is exactly what was checked.
+///
+/// The MAX_PROPOSALS cap is deliberately NOT applied here — it belongs over the
+/// *deduped* set, so a run where several candidates already exist in the library
+/// doesn't crowd out a genuinely-new one.
+fn select_candidates(raw: &str, messages: &[String]) -> Vec<(String, String)> {
+    parse_proposals(raw)
+        .into_iter()
+        .filter(|(_, content)| content.chars().count() <= MAX_TEXT_LEN)
+        .filter_map(|(name, content)| {
+            let template = placeholder::parse(&content)?;
+            template
+                .is_grounded_in(messages)
+                .then(|| (bound_name(&name), template.content))
+        })
+        .collect()
 }
 
 /// Trim a proposal name to the shared bound (proposals arrive fully formed, so
@@ -245,33 +293,12 @@ fn bound_name(name: &str) -> String {
     name.trim().chars().take(MAX_NAME_LEN).collect()
 }
 
-/// How many candidate `[` starts `parse_proposals` will try before giving up —
-/// bounds the work on pathological/adversarial output riddled with brackets.
-const MAX_JSON_STARTS: usize = 32;
-
-/// Parse Claude's reply into `(name, content)` pairs, tolerating prose or
-/// ```` ```json ```` fences around the JSON. Each `[` (leftmost first, so the
-/// outermost array wins) is tried as the array start, paired with the last `]`, and
-/// the first slice that parses as a JSON array is used — a plain first-`[`..last-`]`
-/// mis-slices and drops an otherwise-good pass when the model prepends chatter that
-/// itself contains stray brackets (e.g. `Here you go [note]: [{...}]`). Per element
-/// it pulls the `content` string (required, non-blank) and `name` string (optional);
-/// a malformed element is skipped, not fatal.
+/// Parse Claude's reply into `(name, content)` pairs. Locating the JSON (past any
+/// prose or ```` ```json ```` fences) is [`ai::parse::json_array`]'s job; this reads
+/// the elements. Per element it pulls the `content` string (required, non-blank) and
+/// `name` string (optional); a malformed element is skipped, not fatal.
 fn parse_proposals(raw: &str) -> Vec<(String, String)> {
-    let Some(last) = raw.rfind(']') else {
-        return Vec::new();
-    };
-    let items = raw
-        .match_indices('[')
-        .take(MAX_JSON_STARTS)
-        .filter(|&(a, _)| a <= last)
-        .find_map(
-            |(a, _)| match serde_json::from_str::<serde_json::Value>(&raw[a..=last]) {
-                Ok(serde_json::Value::Array(items)) => Some(items),
-                _ => None,
-            },
-        );
-    let Some(items) = items else {
+    let Some(items) = ai::parse::json_array(raw) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -286,26 +313,18 @@ fn parse_proposals(raw: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Parse the reviewer's reply into one keep/reject verdict per candidate. Tolerant
-/// like [`parse_proposals`]: it finds the outermost JSON array (allowing surrounding
-/// prose or ```` ```json ```` fences), then reads each element's `index` (1-based) and
-/// `keep` flag. Returns a `Vec<bool>` of length `n` — a candidate whose index never
-/// appears, or appears without an affirmative `keep`, defaults to REJECT (the strict
-/// side: a missed snippet is fine, clutter is not). Returns `None` only when no JSON
-/// array is found at all, letting the caller distinguish a genuine "reject some"
-/// verdict from an unparseable reply and degrade accordingly.
+/// Parse the reviewer's reply into one keep/reject verdict per candidate: find the
+/// JSON array (via [`ai::parse::json_array`]), then read each element's `index`
+/// (1-based) and `keep` flag. Returns a `Vec<bool>` of length `n` — a candidate whose
+/// index never appears, or appears without an affirmative `keep`, defaults to REJECT
+/// (the strict side: a missed snippet is fine, clutter is not).
+///
+/// Returns `None` when no array was located — which covers a reply with no JSON in it AND a
+/// reply `ai::parse::json_array` REFUSED as ambiguous (two parseable arrays, e.g. an echoed
+/// shape beside the answer). That lets the caller tell a genuine "reject some" verdict from
+/// a reply it couldn't read; `review_candidates` skips the pass on `None`.
 fn parse_review(raw: &str, n: usize) -> Option<Vec<bool>> {
-    let last = raw.rfind(']')?;
-    let items = raw
-        .match_indices('[')
-        .take(MAX_JSON_STARTS)
-        .filter(|&(a, _)| a <= last)
-        .find_map(
-            |(a, _)| match serde_json::from_str::<serde_json::Value>(&raw[a..=last]) {
-                Ok(serde_json::Value::Array(items)) => Some(items),
-                _ => None,
-            },
-        )?;
+    let items = ai::parse::json_array(raw)?;
     let mut verdicts = vec![false; n];
     for it in items {
         let Some(idx) = it.get("index").and_then(|v| v.as_i64()) else {
@@ -316,29 +335,6 @@ fn parse_review(raw: &str, n: usize) -> Option<Vec<bool>> {
         }
     }
     Some(verdicts)
-}
-
-/// Collapse a string to trimmed, single-spaced form so a whitespace-only difference
-/// between what the model returned and what was scraped doesn't defeat the checks.
-fn normalize_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// A dedup key: whitespace-normalized + lowercased, so "We ship weekly" and "we
-/// ship  weekly" collapse to the same phrase.
-fn normalize_key(s: &str) -> String {
-    normalize_ws(s).to_lowercase()
-}
-
-/// Whether `content` actually appears (whitespace-normalized) in one of the messages
-/// the user sent — the hard verbatim guarantee. A model that paraphrases or invents
-/// fails this and its proposal is dropped.
-fn is_verbatim(messages: &[String], content: &str) -> bool {
-    let needle = normalize_ws(content);
-    if needle.is_empty() {
-        return false;
-    }
-    messages.iter().any(|m| normalize_ws(m).contains(&needle))
 }
 
 #[cfg(test)]
@@ -391,25 +387,55 @@ mod tests {
         );
     }
 
-    #[test]
-    fn verbatim_accepts_a_span_present_in_the_message() {
-        let messages = ["Hi Ada, we are SOC2 compliant and ship weekly.".to_string()];
-        assert!(is_verbatim(&messages, "we are SOC2 compliant"));
-        // Whitespace differences don't matter.
-        assert!(is_verbatim(&messages, "we are  SOC2   compliant"));
+    fn sent(message: &str) -> Vec<String> {
+        vec![message.to_string()]
     }
 
     #[test]
-    fn verbatim_rejects_a_paraphrase_or_invention() {
-        let messages = ["Hi Ada, we are SOC2 compliant.".to_string()];
-        assert!(!is_verbatim(&messages, "we hold SOC2 certification")); // paraphrase
-        assert!(!is_verbatim(&messages, "we raised a seed round")); // invented
-        assert!(!is_verbatim(&messages, "")); // empty never matches
+    fn selects_a_verbatim_span_and_drops_a_paraphrase() {
+        let messages = sent("Hi Ada, we are SOC2 compliant and ship weekly.");
+        let raw = r#"[
+            {"name": "SOC2", "content": "we are SOC2 compliant"},
+            {"name": "Made up", "content": "we hold SOC2 certification"}
+        ]"#;
+        assert_eq!(
+            select_candidates(raw, &messages),
+            vec![("SOC2".to_string(), "we are SOC2 compliant".to_string())]
+        );
     }
 
+    /// The point of the blank: a line whose only problem was one person's details
+    /// now survives, canonicalized, instead of being thrown away.
     #[test]
-    fn normalize_key_collapses_whitespace_and_case() {
-        assert_eq!(normalize_key("We  Ship\nWeekly"), normalize_key("we ship weekly"));
+    fn selects_a_blanked_span_and_stores_the_canonical_label() {
+        let messages =
+            sent("Since you're running ops at Acme, follow-ups slip once you pass 50 threads.");
+        let raw = r#"[{
+            "name": "Follow-ups slip",
+            "content": "Since you're running [THEIR KIND OF TEAM], follow-ups slip once you pass 50 threads."
+        }]"#;
+        assert_eq!(
+            select_candidates(raw, &messages),
+            vec![(
+                "Follow-ups slip".to_string(),
+                "Since you're running [their kind of team], follow-ups slip once you pass 50 \
+                 threads."
+                    .to_string()
+            )]
+        );
+    }
+
+    /// A blank is not a licence to rewrite: the words around it are still held to
+    /// the verbatim rule, and a skeleton is still refused.
+    #[test]
+    fn drops_a_blanked_candidate_that_reworded_or_hollowed_out_the_line() {
+        let messages =
+            sent("Since you're running ops at Acme, follow-ups slip once you pass 50 threads.");
+        let raw = r#"[
+            {"name": "Reworded", "content": "Because you run [their kind of team], follow-ups slip once you pass 50 threads."},
+            {"name": "Skeleton", "content": "[the situation], [the problem]"}
+        ]"#;
+        assert!(select_candidates(raw, &messages).is_empty());
     }
 
     #[test]

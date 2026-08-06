@@ -14,6 +14,7 @@
 
 use tauri::{AppHandle, State};
 
+use super::dedup::{self, RedundancyGroup};
 use super::model::Snippet;
 use super::{classify, repository};
 use crate::database::AppState;
@@ -46,6 +47,14 @@ pub fn update_snippet(
 ) -> Result<Snippet, String> {
     let name = bounded(&name, MAX_NAME_LEN, "Snippet name")?;
     let content = bounded(&content, MAX_TEXT_LEN, "Snippet content")?;
+    // Blanks written by hand get checked too. The propose pass validates every candidate
+    // it extracts, but nothing validated what the user typed — so an unclosed or nested
+    // bracket went straight into the library and on to the draft composer, which is the
+    // one place a literal bracket must never reach. Only genuinely broken shapes are
+    // rejected, not the model-facing rules; see `placeholder::shape_error`.
+    if let Some(problem) = super::placeholder::shape_error(content) {
+        return Err(problem.to_string());
+    }
     let (snippet, content_changed) = {
         let conn = state.conn.lock().map_err(|e| e.to_string())?;
         // Whether the content actually changed vs. what's stored — so a name-only
@@ -127,4 +136,17 @@ pub fn set_snippet_category(
 #[tauri::command]
 pub async fn reclassify_snippets(app: AppHandle) -> Result<usize, String> {
     classify::reclassify_all(app).await
+}
+
+/// Search the approved library for snippets that say the same thing, and return the
+/// groups found — the second half of the "Organize library" action, which the frontend
+/// runs straight after `reclassify_snippets`.
+///
+/// Read-only: nothing is deleted, or even marked. The user picks which rows to drop
+/// from each group and the UI deletes them via `delete_snippet`, so a wrong grouping
+/// costs a glance rather than lost material. An empty result means the library holds no
+/// redundancy — a real answer, distinct from the `Err` that says the check couldn't run.
+#[tauri::command]
+pub async fn find_redundant_snippets(app: AppHandle) -> Result<Vec<RedundancyGroup>, String> {
+    dedup::find_redundant(app).await
 }

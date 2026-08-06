@@ -38,9 +38,14 @@ pub(crate) fn spawn(app: AppHandle, snippet_id: i64) {
 /// rather than propagating; this is fire-and-forget.
 async fn run(app: AppHandle, snippet_id: i64) {
     // Gather under one lock: the snippet, and the library's existing categories (so
-    // the model reuses a fitting one). Only approved, non-blank, non-manual snippets
-    // are classified — a blank card has nothing to place, a proposal is shown
-    // separately until approved, and a manual row is off-limits.
+    // the model reuses a fitting one). Only approved, non-blank snippets are classified —
+    // a blank card has nothing to place, and a proposal is shown separately until approved.
+    //
+    // A MANUAL row is classified too, deliberately. The pin protects the stage the user
+    // chose, and `repository::set_classification` enforces that per column; skipping the
+    // row entirely also withheld its `topic`, which has no hand-set counterpart to protect
+    // and so has nothing to gain from the pin. Bailing here is what made a hand-organized
+    // library permanently untopiced.
     let gathered = {
         let app = app.clone();
         tokio::task::spawn_blocking(move || {
@@ -50,19 +55,17 @@ async fn run(app: AppHandle, snippet_id: i64) {
             else {
                 return Ok::<_, String>(None);
             };
-            if snippet.content.trim().is_empty()
-                || snippet.manual
-                || snippet.status != APPROVED
-            {
+            if snippet.content.trim().is_empty() || snippet.status != APPROVED {
                 return Ok(None);
             }
             let existing = repository::existing_categories(&conn).map_err(|e| e.to_string())?;
-            Ok(Some((snippet.content, existing)))
+            let topics = repository::existing_topics(&conn).map_err(|e| e.to_string())?;
+            Ok(Some((snippet.content, existing, topics)))
         })
         .await
     };
 
-    let (content, existing) = match gathered {
+    let (content, existing, topics) = match gathered {
         Ok(Ok(Some(v))) => v,
         Ok(Ok(None)) => return, // deleted, blank, proposed, or manual — nothing to do
         Ok(Err(e)) => {
@@ -75,7 +78,11 @@ async fn run(app: AppHandle, snippet_id: i64) {
         }
     };
 
-    let ctx = ClassifyContext { content: &content, existing_categories: &existing };
+    let ctx = ClassifyContext {
+        content: &content,
+        existing_categories: &existing,
+        existing_topics: &topics,
+    };
     let raw = match ai::client::run_capped_background(Prompt::classify_snippet(&ctx)).await {
         Ok(Some(t)) => t,
         // No spare CLI capacity — interactive work has the permits. Skip; the next
@@ -87,12 +94,18 @@ async fn run(app: AppHandle, snippet_id: i64) {
         }
     };
 
-    let Some((position, category)) = parse_classification(&raw) else {
-        return; // unparseable model output — drop it
+    // One shared rule for what the reply means — see `decide`. Pins a canonical stage to
+    // its anchor + spelling, snaps a freeform stage or topic to an existing spelling so
+    // "security" doesn't fork "Security", and keeps the snippet where it is when the reply
+    // names no stage.
+    let Decision::Write { position, category, topic } =
+        decide(parse_classification(&raw), &existing, &topics)
+    else {
+        // Unreadable reply. Dropping it leaves the row as it was, which is the safe
+        // outcome: the next edit re-classifies.
+        eprintln!("snippets: classify could not read the classifier's reply; leaving the snippet as it was");
+        return;
     };
-    // Pin a canonical stage to its anchor + spelling; snap a freeform label to an
-    // existing spelling so "security" doesn't fork "Security".
-    let (position, category) = finalize_classification(position, &category, &existing);
 
     // Write under one lock, but only if the row is still classifiable AND still holds
     // the exact content we classified — otherwise a newer edit is in flight and its
@@ -104,20 +117,25 @@ async fn run(app: AppHandle, snippet_id: i64) {
         let Some(cur) = repository::find(&conn, snippet_id).map_err(|e| e.to_string())? else {
             return Ok::<bool, String>(false);
         };
-        if cur.manual || cur.status != APPROVED || cur.content.trim() != content.trim() {
-            return Ok(false); // pinned, un-approved, or superseded by a newer edit
+        if cur.status != APPROVED || cur.content.trim() != content.trim() {
+            return Ok(false); // un-approved, or superseded by a newer edit
         }
-        // Nothing to do if the classification is unchanged — avoids a no-op UPDATE
-        // and, more importantly, the spurious `snippets://changed` reload/re-sort it
-        // would otherwise trigger. (We only reach here on a genuine content change,
-        // so re-deriving an empty category is correct: the content is now
-        // uncategorizable, and blanking it is the right answer.)
-        if cur.position == position && cur.category == category {
-            return Ok(false);
-        }
-        let updated = repository::set_classification(&conn, snippet_id, position, &category)
-            .map_err(|e| e.to_string())?;
-        Ok(updated.is_some())
+        let updated = repository::set_classification(
+            &conn,
+            snippet_id,
+            position.resolve(cur.position),
+            &category,
+            &topic,
+        )
+        .map_err(|e| e.to_string())?;
+        // Report whether anything actually MOVED, not whether a row matched. The write
+        // honours a manual pin per column, so asking the returned row is the only way to
+        // know without restating that rule here — and restating it is how the two would
+        // drift. This gates the `snippets://changed` emit below, and a spurious emit is
+        // what made cards visibly blink out and re-home mid-pass.
+        Ok(updated.is_some_and(|u| {
+            u.position != cur.position || u.category != cur.category || u.topic != cur.topic
+        }))
     })
     .await;
 
@@ -162,11 +180,19 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
 
     let total = items.len();
     let mut existing: Vec<String> = Vec::new();
+    // Topics accumulate the same way stages do, and from empty for the same reason: the
+    // batch mints one self-consistent vocabulary instead of snapping back to whatever the
+    // library happened to hold before.
+    let mut topics: Vec<String> = Vec::new();
     let mut count = 0usize;
     let mut gen_errors = 0usize;
     let mut last_err = String::new();
     for (id, content) in items {
-        let ctx = ClassifyContext { content: &content, existing_categories: &existing };
+        let ctx = ClassifyContext {
+        content: &content,
+        existing_categories: &existing,
+        existing_topics: &topics,
+    };
         let raw = match ai::client::run_capped(Prompt::classify_snippet(&ctx)).await {
             Ok(t) => t,
             Err(e) => {
@@ -176,16 +202,26 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
                 continue;
             }
         };
-        // An unparseable reply is a failed classification, not a no-op: count it
-        // with the generation errors so a classifier that answers every prompt
-        // with garbage can't come back as a reassuring `0 changed`.
-        let Some((position, category)) = parse_classification(&raw) else {
-            eprintln!("snippets: reclassify could not parse the classifier's reply");
-            gen_errors += 1;
-            last_err = "the classifier's reply couldn't be parsed".to_string();
-            continue;
-        };
-        let (position, category) = finalize_classification(position, &category, &existing);
+        // Same rule as the per-edit pass — see `decide`. An UNREADABLE reply is a failed
+        // classification, not a no-op: count it with the generation errors so a classifier
+        // that answers every prompt with garbage can't come back as a reassuring
+        // `0 changed`. An empty STAGE is not in that category — it is the answer the prompt
+        // asks for when a line serves no conversational role, so it is written (the snippet
+        // becomes unstaged but does not move on the arc) and never counted as an error.
+        // Counting it was wrong twice over: a library of pure conversational moves failed
+        // outright with a message blaming an unreachable CLI, and skipping the write left a
+        // stale topic-style label in the stage field that the next classify prompt then
+        // offered back as a stage to reuse — undoing the cleanup this batch exists to do.
+        let (position, category, topic) =
+            match decide(parse_classification(&raw), &existing, &topics) {
+                Decision::Write { position, category, topic } => (position, category, topic),
+                Decision::Failed(why) => {
+                    eprintln!("snippets: reclassify skipped a snippet — {why}");
+                    gen_errors += 1;
+                    last_err = why.to_string();
+                    continue;
+                }
+            };
 
         // Force-write, but only if the row still exists and still holds the content we
         // classified — a mid-batch edit's own pass will place the newer text.
@@ -194,6 +230,7 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
         let app2 = app.clone();
         let classified = content.clone();
         let cat = category.clone();
+        let top = topic.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let st = app2.state::<AppState>();
             let conn = st.conn.lock().map_err(|e| e.to_string())?;
@@ -203,14 +240,17 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
             if cur.status != APPROVED || cur.content.trim() != classified.trim() {
                 return Ok(None);
             }
+            // A reply that named no stage carries no arc information, so the snippet keeps
+            // the position it already had rather than being relocated to a guess.
+            let target = position.resolve(cur.position);
             // Nothing to write if this row already holds this classification AND is
             // already auto — skip the no-op UPDATE and its spurious `snippets://changed`
             // reload (mirrors the per-edit `run` guard). A manual row with the same
             // labels still needs writing: the force resets it to auto (`manual = 0`).
-            if cur.position == position && cur.category == cat && !cur.manual {
+            if cur.position == target && cur.category == cat && cur.topic == top && !cur.manual {
                 return Ok(Some(false));
             }
-            let did = repository::force_classification(&conn, id, position, &cat)
+            let did = repository::force_classification(&conn, id, target, &cat, &top)
                 .map_err(|e| e.to_string())?
                 .is_some();
             Ok(Some(did))
@@ -224,6 +264,9 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
         if let Some(wrote) = outcome {
             if !category.is_empty() && !existing.iter().any(|c| c == &category) {
                 existing.push(category.clone());
+            }
+            if !topic.is_empty() && !topics.iter().any(|t| t == &topic) {
+                topics.push(topic.clone());
             }
             if wrote {
                 count += 1;
@@ -249,36 +292,111 @@ pub(crate) async fn reclassify_all(app: AppHandle) -> Result<usize, String> {
     Ok(count)
 }
 
-/// Parse Claude's reply into `(position, category)`. Tolerant, mirroring
-/// `parse_healed`: takes the outermost `{...}` object (so a reply wrapped in prose
-/// or ```` ```json ```` fences still parses). `position` is clamped to 0.0–1.0
-/// (a non-finite or missing value falls back to mid-arc 0.5); `category` is the
-/// trimmed, length-bounded string (missing = empty). Returns `None` only when no
-/// JSON object is found at all.
-fn parse_classification(raw: &str) -> Option<(f64, String)> {
-    let slice = match (raw.find('{'), raw.rfind('}')) {
-        (Some(a), Some(b)) if b > a => &raw[a..=b],
-        _ => return None,
+/// One classification as the model actually answered it, before any judgement about what
+/// to store.
+struct Parsed {
+    /// Clamped to 0.0–1.0; mid-arc 0.5 when absent or non-finite.
+    position: f64,
+    /// `None` when the reply carried no usable `category` field at all (absent, null, or
+    /// not a string) — a malformed answer. `Some("")` is different and important: it is the
+    /// answer `CLASSIFY_INSTRUCTION` explicitly asks for when a line serves no
+    /// conversational role, and must not be read as a failure.
+    ///
+    /// Collapsing those two was the bug this type exists to prevent. It made a compliant
+    /// reply indistinguishable from a broken one, and the two passes then guessed
+    /// differently: the batch counted it as a generation error (so a library of pure
+    /// conversational moves failed outright, blaming an unreachable CLI), while the
+    /// per-edit pass wrote it *and* moved the snippet to the 0.5 fallback.
+    category: Option<String>,
+    /// Always a plain string: an empty topic is a normal answer on every path, so there is
+    /// nothing here to distinguish.
+    topic: String,
+}
+
+/// Where a classification places a snippet on the conversation arc.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ArcPosition {
+    At(f64),
+    /// Leave the snippet where it is. A reply that names no stage says nothing about where
+    /// on the arc the line belongs either, so its `position` is not evidence — relocating
+    /// on it would scramble the order the library and the draft composer both read.
+    Unchanged,
+}
+
+impl ArcPosition {
+    fn resolve(&self, current: f64) -> f64 {
+        match self {
+            ArcPosition::At(p) => *p,
+            ArcPosition::Unchanged => current,
+        }
+    }
+}
+
+/// What one classification reply means for one snippet.
+enum Decision {
+    Write { position: ArcPosition, category: String, topic: String },
+    /// The reply couldn't be read as a classification. Not a no-op: a classifier answering
+    /// every prompt with garbage must not come back as a reassuring "0 changed", so the
+    /// batch pass counts these toward its all-failed check.
+    Failed(&'static str),
+}
+
+/// Turn a parsed reply into what to store — the whole per-row rule, in one pure function
+/// both passes call.
+///
+/// It lives apart from the orchestrators on purpose. This logic used to be inlined in each
+/// of them, where an `AppHandle` and a live CLI put it out of reach of any test, and it
+/// promptly drifted: the two paths disagreed about what an empty stage meant, in opposite
+/// directions, and nothing caught it. There is one rule now, and it is testable.
+fn decide(
+    parsed: Option<Parsed>,
+    existing_categories: &[String],
+    existing_topics: &[String],
+) -> Decision {
+    let Some(parsed) = parsed else {
+        return Decision::Failed("the classifier's reply couldn't be read");
     };
-    let obj = match serde_json::from_str::<serde_json::Value>(slice) {
-        Ok(serde_json::Value::Object(m)) => m,
-        _ => return None,
+    let Some(category) = parsed.category else {
+        return Decision::Failed("the classifier's reply named no stage field");
     };
+    let (position, category, topic) = finalize_classification(
+        parsed.position,
+        &category,
+        &parsed.topic,
+        existing_categories,
+        existing_topics,
+    );
+    // An empty stage is an answer ("this line serves no conversational role"), so it IS
+    // written — leaving the row's old label in place would keep a stale, often topic-style
+    // category that the next classify prompt then offers back as a stage to reuse, against
+    // that prompt's own rule. But the snippet stays put on the arc: see `ArcPosition`.
+    let position = if category.is_empty() {
+        ArcPosition::Unchanged
+    } else {
+        ArcPosition::At(position)
+    };
+    Decision::Write { position, category, topic }
+}
+
+/// Parse Claude's reply into a [`Parsed`]. Locating the `{...}` object past any prose or
+/// ```` ```json ```` fences is [`ai::parse::json_object`]'s job. Labels are trimmed and
+/// length-bounded. Returns `None` only when no JSON object is found at all.
+fn parse_classification(raw: &str) -> Option<Parsed> {
+    let obj = ai::parse::json_object(raw)?;
     let position = obj
         .get("position")
         .and_then(|v| v.as_f64())
         .filter(|p| p.is_finite())
         .unwrap_or(0.5)
         .clamp(0.0, 1.0);
-    let category: String = obj
-        .get("category")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(MAX_NAME_LEN)
-        .collect();
-    Some((position, category))
+    let label = |key: &str| -> Option<String> {
+        Some(obj.get(key)?.as_str()?.trim().chars().take(MAX_NAME_LEN).collect())
+    };
+    Some(Parsed {
+        position,
+        category: label("category"),
+        topic: label("topic").unwrap_or_default(),
+    })
 }
 
 /// The canonical conversation stages and their arc anchors, kept in lockstep with the
@@ -325,11 +443,23 @@ fn canonical_stage(category: &str) -> Option<(&'static str, f64)> {
 /// composer sorts snippets by it, and a re-run must be idempotent, none of which holds
 /// if `position` is left to model noise. A freeform (non-canonical) label keeps its
 /// clamped model position and is snapped to an existing spelling; empty stays empty.
-fn finalize_classification(position: f64, category: &str, existing: &[String]) -> (f64, String) {
+/// `topic` gets only the snap — no canonical table and no anchor, because there is no
+/// fixed set of topics and a topic says nothing about where on the arc a line sits.
+/// Snapping still matters, and arguably more: stages have a canonical list to fall back
+/// on, whereas the topic vocabulary is *only* what's already in the library, so an
+/// unsnapped "security" beside "Security" permanently forks a subject.
+fn finalize_classification(
+    position: f64,
+    category: &str,
+    topic: &str,
+    existing_categories: &[String],
+    existing_topics: &[String],
+) -> (f64, String, String) {
+    let topic = snap_to_existing(topic, existing_topics);
     if let Some((name, anchor)) = canonical_stage(category) {
-        return (anchor, name.to_string());
+        return (anchor, name.to_string(), topic);
     }
-    (position, snap_to_existing(category, existing))
+    (position, snap_to_existing(category, existing_categories), topic)
 }
 
 /// If `category` matches an existing one loosely (case, whitespace, and punctuation
@@ -353,33 +483,110 @@ mod tests {
 
     #[test]
     fn parses_a_plain_object() {
-        let (pos, cat) = parse_classification(r#"{"position": 0.8, "category": "Book a call"}"#).unwrap();
-        assert_eq!(pos, 0.8);
-        assert_eq!(cat, "Book a call");
+        let p = parse_classification(
+            r#"{"position": 0.8, "category": "Book a call", "topic": "Pricing"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.position, 0.8);
+        assert_eq!(p.category.as_deref(), Some("Book a call"));
+        assert_eq!(p.topic, "Pricing");
+    }
+
+    /// A reply from before the topic axis existed still parses — the field is simply
+    /// empty, which is a legitimate value rather than a failure.
+    #[test]
+    fn a_reply_with_no_topic_field_parses_with_an_empty_topic() {
+        let p = parse_classification(r#"{"position": 0.8, "category": "Objection"}"#).unwrap();
+        assert_eq!(p.category.as_deref(), Some("Objection"));
+        assert_eq!(p.topic, "");
     }
 
     #[test]
     fn parses_object_wrapped_in_prose_or_fences() {
-        let raw = "Sure:\n```json\n{\"position\": 0.1, \"category\": \"Opener\"}\n```\n";
-        let (pos, cat) = parse_classification(raw).unwrap();
-        assert_eq!(pos, 0.1);
-        assert_eq!(cat, "Opener");
+        let raw = "Sure:\n```json\n{\"position\": 0.1, \"category\": \"Opener\", \"topic\": \"Hiring\"}\n```\n";
+        let p = parse_classification(raw).unwrap();
+        assert_eq!(p.position, 0.1);
+        assert_eq!(p.category.as_deref(), Some("Opener"));
+        assert_eq!(p.topic, "Hiring");
     }
 
     #[test]
     fn clamps_position_and_defaults_bad_or_missing() {
-        assert_eq!(parse_classification(r#"{"position": 1.7, "category": "X"}"#).unwrap().0, 1.0);
-        assert_eq!(parse_classification(r#"{"position": -3, "category": "X"}"#).unwrap().0, 0.0);
+        let pos = |raw: &str| parse_classification(raw).unwrap().position;
+        assert_eq!(pos(r#"{"position": 1.7, "category": "X"}"#), 1.0);
+        assert_eq!(pos(r#"{"position": -3, "category": "X"}"#), 0.0);
         // Missing / non-numeric position falls back to mid-arc.
-        assert_eq!(parse_classification(r#"{"category": "X"}"#).unwrap().0, 0.5);
-        assert_eq!(parse_classification(r#"{"position": "high", "category": "X"}"#).unwrap().0, 0.5);
+        assert_eq!(pos(r#"{"category": "X"}"#), 0.5);
+        assert_eq!(pos(r#"{"position": "high", "category": "X"}"#), 0.5);
     }
 
+    /// The distinction the whole per-row rule turns on: a reply that OMITS the stage field
+    /// is malformed, while one that answers it with `""` is the compliant "no clear
+    /// conversational role" answer `CLASSIFY_INSTRUCTION` asks for. Collapsing them is what
+    /// let the two passes disagree about it in opposite directions.
     #[test]
-    fn missing_category_is_empty_and_garbage_is_none() {
-        assert_eq!(parse_classification(r#"{"position": 0.5}"#).unwrap().1, "");
+    fn an_absent_stage_field_is_distinguished_from_an_explicitly_empty_one() {
+        assert_eq!(parse_classification(r#"{"position": 0.5}"#).unwrap().category, None);
+        // Present but not a string is equally unusable.
+        assert_eq!(
+            parse_classification(r#"{"position": 0.5, "category": null}"#).unwrap().category,
+            None
+        );
+        // Explicitly empty — an answer, not an omission. Whitespace still counts as answered.
+        assert_eq!(
+            parse_classification(r#"{"position": 0.5, "category": ""}"#).unwrap().category,
+            Some(String::new())
+        );
+        assert_eq!(
+            parse_classification(r#"{"position": 0.5, "category": "  "}"#).unwrap().category,
+            Some(String::new())
+        );
+
         assert!(parse_classification("no json here").is_none());
         assert!(parse_classification("").is_none());
+    }
+
+    /// The per-row rule, which used to live inlined in two orchestrators behind an
+    /// `AppHandle` and a live CLI where nothing could test it.
+    #[test]
+    fn decide_writes_a_real_stage_and_anchors_it() {
+        let d = decide(parse_classification(r#"{"position": 0.2, "category": "Objection", "topic": "Pricing"}"#), &[], &[]);
+        let Decision::Write { position, category, topic } = d else {
+            panic!("a well-formed reply must be written");
+        };
+        // Canonical stage: pinned to its anchor, not the model's 0.2.
+        assert_eq!(position, ArcPosition::At(0.72));
+        assert_eq!(category, "Objection");
+        assert_eq!(topic, "Pricing");
+    }
+
+    /// An unreadable reply is a failure on both paths — the batch counts it toward the
+    /// all-failed check, the per-edit pass drops it. Neither writes anything.
+    #[test]
+    fn decide_fails_on_an_unreadable_reply_or_a_missing_stage_field() {
+        assert!(matches!(decide(parse_classification("not json"), &[], &[]), Decision::Failed(_)));
+        assert!(matches!(
+            decide(parse_classification(r#"{"position": 0.9}"#), &[], &[]),
+            Decision::Failed(_)
+        ));
+    }
+
+    /// The compliant empty answer: written (so a stale topic-style label can't survive in
+    /// the stage field and get re-offered as a stage), never counted as an error, and the
+    /// snippet does NOT move on the arc — a reply naming no stage is not evidence about
+    /// where the line sits, and the `position` beside it is the 0.5 fallback or model noise.
+    #[test]
+    fn decide_writes_an_empty_stage_without_relocating_the_snippet() {
+        let d = decide(parse_classification(r#"{"position": 0.4, "category": ""}"#), &[], &[]);
+        let Decision::Write { position, category, topic } = d else {
+            panic!("an explicitly empty stage is an answer, not a failure");
+        };
+        assert_eq!(category, "");
+        assert_eq!(topic, "");
+        assert_eq!(position, ArcPosition::Unchanged);
+        // Unchanged keeps whatever the row already had, whatever that was.
+        assert_eq!(position.resolve(0.58), 0.58);
+        assert_eq!(ArcPosition::At(0.72).resolve(0.58), 0.72);
     }
 
     #[test]
@@ -413,16 +620,44 @@ mod tests {
         // A canonical stage is snapped to its anchor + spelling regardless of the
         // position the model returned — so ordering is stable and re-runs idempotent.
         assert_eq!(
-            finalize_classification(0.5, "follow up", &[]),
-            (0.96, "Follow-up".to_string())
+            finalize_classification(0.5, "follow up", "", &[], &[]),
+            (0.96, "Follow-up".to_string(), String::new())
         );
         // A freeform label keeps its position and snaps to an existing spelling.
         let existing = vec!["Discovery".to_string()];
         assert_eq!(
-            finalize_classification(0.33, "discovery", &existing),
-            (0.33, "Discovery".to_string())
+            finalize_classification(0.33, "discovery", "", &existing, &[]),
+            (0.33, "Discovery".to_string(), String::new())
         );
         // Empty stays empty, position untouched.
-        assert_eq!(finalize_classification(0.4, "", &[]), (0.4, String::new()));
+        assert_eq!(
+            finalize_classification(0.4, "", "", &[], &[]),
+            (0.4, String::new(), String::new())
+        );
+    }
+
+    /// The topic is snapped but never anchored: it can't move `position` and it isn't
+    /// held to the canonical stage table, because a topic says nothing about arc order.
+    #[test]
+    fn finalize_snaps_the_topic_without_anchoring_it() {
+        let topics = vec!["Security".to_string()];
+        // Case/punctuation drift snaps to the existing spelling rather than forking it.
+        assert_eq!(
+            finalize_classification(0.58, "Engaged", "security", &[], &topics),
+            (0.58, "Engaged".to_string(), "Security".to_string())
+        );
+        // A genuinely new topic is kept as-is, and does NOT shift the anchored position.
+        assert_eq!(
+            finalize_classification(0.2, "follow up", "Integrations", &[], &topics),
+            (0.96, "Follow-up".to_string(), "Integrations".to_string())
+        );
+        // A stage label must never leak into the topic slot's vocabulary and vice versa —
+        // they snap against separate sets.
+        let stages = vec!["Objection".to_string()];
+        assert_eq!(
+            finalize_classification(0.72, "objection", "objection", &stages, &topics),
+            (0.72, "Objection".to_string(), "objection".to_string()),
+            "the topic must not snap to a STAGE spelling"
+        );
     }
 }
