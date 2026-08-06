@@ -22,12 +22,29 @@ toward *their* goal.
 - **Customers** — an ideal-customer profile per kind of buyer: who they are, what they
   care about, and the goal for a thread with them. This is what steers snippet choice;
   it owns no pipeline and no snippets of its own.
-- **Prospects & pipeline** — one board everyone moves through, with an "awaiting reply"
-  flag derived from captured message history. Each prospect points at a customer
-  profile (or none — they still sit in the pipeline, their drafts just get no goal).
-- **Snippets** — one library of reusable message building blocks, tagged by *where in a
-  conversation* they fit, with `[bracket]` placeholders filled from context. Drafts
-  compose *only* from your snippets and profile — nothing is invented.
+- **Prospects & the cycle** — one board everyone moves through, filterable by customer
+  profile, with an "awaiting reply" flag derived from captured message history. Each
+  prospect points at a customer profile (or none — they still sit in the pipeline, their
+  drafts just get no goal).
+- **Stage goals & auto-advance** — every stage of the cycle carries a *goal*: what has to
+  be true before someone belongs in the next one. Drafts for the people in a stage aim at
+  that goal, and after each captured message Claude re-reads the thread and asks whether
+  it's been met — surfacing a one-click **suggestion** on the card, with its reasoning.
+  Nothing ever moves on its own.
+- **Staleness** — each stage sets how many days of silence *from you* turn a card amber,
+  then red, so threads you've dropped surface instead of quietly aging.
+- **Snippets** — one library of reusable message building blocks, with `[bracket]`
+  placeholders filled from context. Each carries two independent tags: a **stage** (*where
+  in a conversation* the line fits — the primary axis, which the library groups by and you
+  can set by hand) and a **topic** (*what it's about* — AI-derived and read-only). A draft
+  prefers lines on the topic the thread is already on, and changes subject when the thread
+  gives it a reason to. Drafts compose from your snippets and profile — the substance is
+  yours, with blanks filled from the prospect and short connecting sentences added to join
+  the lines up.
+- **Organize library** — one action re-scores every snippet, re-groups them by stage,
+  re-tags what each is about, and flags groups that say the same thing. The redundancy
+  report is a review panel: you pick which version to keep, and nothing is deleted until
+  you do.
 - **Profile** — global "who you are" context: your background, role, and voice.
 - **LinkedIn capture** — a Chrome extension adds a capture button to LinkedIn: save a
   person as a prospect and pull their chat history into the CRM.
@@ -61,7 +78,7 @@ src-tauri/src/
   features/               # one folder per concept — product, customers, prospects,
                           #   stages, profile, snippets, messages, comments, watchlist
                           #   (each: mod / model / repository / commands)
-  ai/                     # single path to the local Claude Code CLI (prompt + client)
+  ai/                     # single path to the local Claude Code CLI (prompt + client + parse)
   ingest/                 # loopback HTTP server, Chrome discovery, heartbeat gate, security
   util.rs                 # shared input bounds
 
