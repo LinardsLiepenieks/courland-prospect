@@ -78,6 +78,8 @@ pub fn run() {
             features::stages::commands::create_stage,
             features::stages::commands::rename_stage,
             features::stages::commands::set_stage_color,
+            features::stages::commands::set_stage_goal,
+            features::stages::commands::set_stage_thresholds,
             features::stages::commands::reorder_stages,
             features::stages::commands::delete_stage,
             features::snippets::commands::list_snippets,

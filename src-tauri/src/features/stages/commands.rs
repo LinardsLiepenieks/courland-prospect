@@ -9,10 +9,10 @@ use std::collections::HashSet;
 
 use tauri::{AppHandle, Emitter, State};
 
-use super::model::{is_valid_color, Stage, KIND_MESSAGING};
+use super::model::{is_valid_color, validate_thresholds, Stage, KIND_MESSAGING};
 use super::repository;
 use crate::database::AppState;
-use crate::util::{bounded, MAX_NAME_LEN};
+use crate::util::{bounded, MAX_NAME_LEN, MAX_TEXT_LEN};
 
 /// Emitted after any pipeline edit so views rendering the pipeline elsewhere
 /// (the Prospects board) re-fetch instead of going stale. A delete reassigns
@@ -70,6 +70,46 @@ pub fn set_stage_color(
     }
     let conn = state.conn.lock().map_err(|e| e.to_string())?;
     let stage = repository::set_color(&conn, id, &color)
+        .map_err(|e| e.to_string())?
+        .ok_or("Stage not found.")?;
+    let _ = app.emit(STAGES_CHANGED, ());
+    Ok(stage)
+}
+
+/// Set a stage's goal — what this step of the cycle is for, and therefore what
+/// the advance analyzer tests a thread against. Empty is allowed and meaningful:
+/// it turns off both steering and auto-advance for that stage.
+#[tauri::command]
+pub fn set_stage_goal(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    goal: String,
+) -> Result<Stage, String> {
+    let goal = bounded(&goal, MAX_TEXT_LEN, "Stage goal")?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let stage = repository::set_goal(&conn, id, goal)
+        .map_err(|e| e.to_string())?
+        .ok_or("Stage not found.")?;
+    let _ = app.emit(STAGES_CHANGED, ());
+    Ok(stage)
+}
+
+/// Set how long a card may sit in this stage without outreach before it's
+/// nudged (`warn_days`) and then flagged as rotting (`stale_days`). Written as
+/// one pair because the two are only meaningful relative to each other — a
+/// partial write could transiently invert them.
+#[tauri::command]
+pub fn set_stage_thresholds(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    warn_days: i64,
+    stale_days: i64,
+) -> Result<Stage, String> {
+    validate_thresholds(warn_days, stale_days)?;
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let stage = repository::set_thresholds(&conn, id, warn_days, stale_days)
         .map_err(|e| e.to_string())?
         .ok_or("Stage not found.")?;
     let _ = app.emit(STAGES_CHANGED, ());

@@ -41,8 +41,24 @@ export interface Stage {
   position: number;
   kind: StageKind;
   color: StageColor;
+  /** What this step is FOR — what has to become true before a prospect belongs
+   *  in the next stage. Read by the draft composer (so a reply aims at this step
+   *  rather than the whole relationship) and by the advance analyzer (which tests
+   *  each new message against it). Empty is valid and common: a stage with no
+   *  goal steers nothing and is never auto-advanced out of. */
+  goal: string;
+  /** Days without outreach from you before a card in this stage is nudged, then
+   *  flagged as rotting. Per-stage: a freshly messaged prospect goes cold faster
+   *  than one mid-onboarding. Always `warn_days < stale_days` (backend-enforced). */
+  warn_days: number;
+  stale_days: number;
   created_at: string;
 }
+
+/** Bounds the backend enforces on the staleness thresholds — mirrored here so the
+ *  number inputs can clamp before a doomed round-trip. */
+export const MIN_STALENESS_DAYS = 1;
+export const MAX_STALENESS_DAYS = 365;
 
 // Typed wrappers over the Rust stage commands. All SQL lives in the backend.
 // There is one pipeline, so none of these take an owner.
@@ -63,6 +79,23 @@ export function renameStage(id: number, name: string): Promise<Stage> {
 /** Set a stage's color to a palette token. Returns the updated stage. */
 export function setStageColor(id: number, color: StageColor): Promise<Stage> {
   return invoke("set_stage_color", { id, color });
+}
+
+/** Set what this step of the cycle is for. Empty clears it, which turns off both
+ *  goal-steering and auto-advance for the stage. Returns the updated stage. */
+export function setStageGoal(id: number, goal: string): Promise<Stage> {
+  return invoke("set_stage_goal", { id, goal });
+}
+
+/** Set how many days of silence put a card in this stage at warn, then stale.
+ *  Written as a pair — the two are only meaningful relative to each other, and
+ *  the backend rejects an inverted or out-of-range set. Returns the updated stage. */
+export function setStageThresholds(
+  id: number,
+  warnDays: number,
+  staleDays: number,
+): Promise<Stage> {
+  return invoke("set_stage_thresholds", { id, warnDays, staleDays });
 }
 
 /** Delete a stage; its prospects fall back to the previous stage. The messaging
