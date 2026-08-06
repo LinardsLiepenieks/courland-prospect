@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   approveSnippet,
@@ -12,11 +13,12 @@ import {
   deleteSnippet,
   listSnippets,
   onSnippetsChanged,
-  reclassifySnippets,
   setSnippetCategory,
   updateSnippet,
+  type RedundancyGroup,
   type Snippet,
 } from "../api/snippets";
+import * as organize from "./organizeRun";
 import { errorMessage } from "../lib/errors";
 import { useAsyncAction } from "../lib/useAsyncAction";
 import { useAutosave } from "../lib/useAutosave";
@@ -28,6 +30,7 @@ import {
 } from "../components/Popover";
 import LoadError from "../components/LoadError";
 import SavedIndicator from "../components/SavedIndicator";
+import { hasBlank, splitOnBlanks } from "./blanks";
 import styles from "./SnippetsView.module.css";
 
 /** One conversation-stage section: the category label and the snippets in it. */
@@ -86,10 +89,10 @@ export default function SnippetsView() {
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped by the retry button to re-run the load after a failure.
   const [reloadKey, setReloadKey] = useState(0);
-  // The "re-score & re-categorize everything" action: a confirm gate plus its own
-  // async-action (busy flag + caught error + re-entry guard); the component stays
-  // mounted across the batch, so `useAsyncAction`'s finally-reset contract fits.
-  const [confirmingReclassify, setConfirmingReclassify] = useState(false);
+  // The confirm gate for "organize library". Only the gate is component state — the run
+  // itself, its outcome and its report all live in `organizeRun`, because this view is
+  // unmounted on a tab switch and the run outlives that. See below.
+  const [confirmingOrganize, setConfirmingOrganize] = useState(false);
   // Which stage sections are OPEN (by category label). Sections are closed by
   // default (a stage absent from the set is collapsed), so the library reads as a
   // tidy list of stage headers you open on demand. Held here, not per section, so a
@@ -102,20 +105,36 @@ export default function SnippetsView() {
   // moves the card into a closed section can't hide it (and blur it) mid-edit. Cleared
   // when the user manually toggles a section (they've taken control of what's open).
   const [activeSnippetId, setActiveSnippetId] = useState<number | null>(null);
-  // Outcome line for a finished re-score ("Re-scored N snippets") — the batch returns a
-  // count that would otherwise be discarded. Cleared when a new re-score starts.
-  const [reclassifyNote, setReclassifyNote] = useState<string | null>(null);
-  // Set true when a re-score finishes so the next loaded list opens every stage section.
-  // Re-scoring re-homes cards across sections, which are collapsed by default, so without
-  // this the freshly organized library would look empty.
-  const [expandAllOnNextLoad, setExpandAllOnNextLoad] = useState(false);
+  // The organize run — phase, outcome note, redundancy report and error — lives in a
+  // module-level store, NOT in this component. A tab switch unmounts this view (App
+  // renders it conditionally), and holding a 2×60s run's state here meant the finished
+  // report was discarded and the re-entry guard reset. See `organizeRun`.
+  const {
+    phase,
+    note: organizeNote,
+    groups,
+    selections,
+    error: organizeError,
+    libraryVersion,
+    restagedAt,
+  } = useSyncExternalStore(organize.subscribe, organize.getSnapshot);
+  const organizing = phase !== null;
+  // The last re-stage this mount has expanded sections for. A version rather than a
+  // one-shot boolean, because the boolean lived here and a tab switch mid-run threw it
+  // away: the run finished, the reorganized library loaded into a view whose sections were
+  // all collapsed, and the result read as "it did nothing".
+  const expandedForRef = useRef(0);
+  // The Organize trigger and its confirm, so focus can follow the swap between them in
+  // both directions. Opening the gate replaces the <button> with a <div>, which unmounts
+  // the focused node — a two-step gate that can't be completed from the keyboard isn't a
+  // gate, it's a dead end.
+  const organizeBtnRef = useRef<HTMLButtonElement>(null);
+  const organizeGoRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirmingOrganize) organizeGoRef.current?.focus();
+  }, [confirmingOrganize]);
   // Stable base for the per-section header ids that link each card to its stage (a11y).
   const sectionIdBase = useId();
-  const {
-    busy: reclassifying,
-    error: reclassifyError,
-    run: runReclassify,
-  } = useAsyncAction();
   const { busy: adding, error, run } = useAsyncAction();
   // Tracks the latest issued load so an older, slower response can't overwrite it.
   const fetchSeq = useRef(0);
@@ -152,6 +171,14 @@ export default function SnippetsView() {
     loadSnippets(true);
   }, [loadSnippets, reloadKey]);
 
+  // Reload whenever the organize run says the library moved. This also covers a run that
+  // progressed while this view was unmounted (a tab switch): the version it left behind
+  // differs from the one this mount last saw, so remounting reloads once rather than
+  // showing the pre-run list. The initial load above already covers version 0.
+  useEffect(() => {
+    if (libraryVersion > 0) loadSnippets();
+  }, [libraryVersion, loadSnippets]);
+
   // Live-refresh when a background pass changes the library — a new proposal, or a
   // classify pass updating a snippet's position/category. The reload goes through
   // `loadSnippets`, so it can't clobber (or be clobbered by) a concurrent user
@@ -172,17 +199,21 @@ export default function SnippetsView() {
 
   // After a re-score lands its reorganized list, open every stage section so nothing
   // hides. Cards re-home across sections during a re-score and sections are collapsed by
-  // default, so otherwise the reorganized library would read as empty. One-shot, cleared
-  // once applied so ordinary background refreshes don't force sections open.
+  // default, so otherwise the reorganized library would read as empty.
+  //
+  // Keyed on the store's `restagedAt` rather than a local one-shot flag, so this works on a
+  // mount that arrived AFTER the re-score finished — the tab-switch case, where the flag
+  // version silently did nothing. Applied at most once per re-stage, so ordinary background
+  // refreshes don't keep forcing sections open.
   useEffect(() => {
-    if (!expandAllOnNextLoad || !snippets) return;
+    if (restagedAt === 0 || restagedAt === expandedForRef.current || !snippets) return;
+    expandedForRef.current = restagedAt;
     const cats = new Set<string>();
     for (const s of snippets) {
       if (s.status === "approved") cats.add(s.category.trim());
     }
     setOpenStages(cats);
-    setExpandAllOnNextLoad(false);
-  }, [expandAllOnNextLoad, snippets]);
+  }, [restagedAt, snippets]);
 
   function handleAdd() {
     run(async () => {
@@ -202,6 +233,9 @@ export default function SnippetsView() {
           ? prev
           : [created, ...(prev ?? [])],
       );
+      // The list is already updated in place above; this only retires an outcome line
+      // that no longer describes the library.
+      organize.noteLibraryChanged();
     });
   }
 
@@ -209,9 +243,14 @@ export default function SnippetsView() {
   // stays mounted, dimmed, until the reload removes it). Reconciling from the DB
   // rather than filtering locally means a concurrent background refresh can't
   // resurrect the just-deleted row. Rejecting a proposal reuses this exact path.
+  // `noteLibraryChanged` rather than a bare `loadSnippets()`: it bumps the store's
+  // `libraryVersion` (which this view reloads on) AND clears a stale outcome line, since a
+  // note describing a library that has since changed is no longer true. That was what the
+  // store's `libraryVersion` doc always claimed the mechanism was for; the out-of-run half
+  // had just never been wired up, so these called `loadSnippets` directly.
   async function handleDelete(id: number) {
     await deleteSnippet(id);
-    loadSnippets();
+    organize.noteLibraryChanged();
   }
 
   // Approve/set-category own their API call, then reload from the DB so the row
@@ -219,35 +258,51 @@ export default function SnippetsView() {
   // jump when the classify pass lands).
   async function handleApprove(id: number) {
     await approveSnippet(id);
-    loadSnippets();
+    organize.noteLibraryChanged();
   }
   async function handleSetCategory(id: number, category: string) {
     await setSnippetCategory(id, category);
-    loadSnippets();
+    organize.noteLibraryChanged();
   }
 
-  // Re-score + re-categorize the whole library. Resolves once the batch finishes (the
-  // backend emits `snippets://changed` once at the end for any OTHER open editor; this
-  // window reloads itself here). The reload runs in a `finally` so a batch that applied
-  // some rows and then errored still shows the DB's real state, not a stale list — and
-  // sets `expandAllOnNextLoad` so the reorganized, re-homed cards don't hide in the
-  // collapsed sections they moved into.
-  function handleReclassify() {
-    setConfirmingReclassify(false);
-    setReclassifyNote(null);
-    runReclassify(async () => {
+  // Organize the library: re-score + re-categorize every snippet, then search the result
+  // for redundancy. Everything about the run — sequencing, the outcome line, the report,
+  // the re-entry guard, and the flag that expands the re-homed sections — lives in
+  // `organizeRun`, because this view is unmounted on a tab switch and the run takes two
+  // passes of up to 60s each. All this does is close the gate and start it.
+  function handleOrganize() {
+    setConfirmingOrganize(false);
+    void organize.start();
+  }
+
+  // Closing the gate puts focus back where it came from. Without this, dismissing a
+  // confirmation drops focus to <body> exactly as opening it did — so a keyboard user is
+  // penalised for changing their mind.
+  function cancelOrganize() {
+    setConfirmingOrganize(false);
+    organizeBtnRef.current?.focus();
+  }
+
+  // Delete the snippets picked out of one group, then retire the group.
+  //
+  // Sequential rather than `Promise.all`: every delete takes the same single SQLite
+  // connection lock, so racing them only adds contention. But each one is caught
+  // individually — aborting the loop on the first rejection used to leave the REST of
+  // the user's picks alive, which is the opposite of what they asked for. The likeliest
+  // rejection is "Snippet not found" over a row something else already deleted, i.e. a
+  // row that's in the desired state anyway.
+  async function handleGroupDelete(keepId: number, ids: number[]) {
+    const failures: string[] = [];
+    for (const id of ids) {
       try {
-        const changed = await reclassifySnippets();
-        setReclassifyNote(
-          changed > 0
-            ? `Re-scored ${changed} snippet${changed === 1 ? "" : "s"}.`
-            : "Everything was already up to date.",
-        );
-      } finally {
-        setExpandAllOnNextLoad(true);
-        loadSnippets();
+        await deleteSnippet(id);
+      } catch (err) {
+        failures.push(errorMessage(err));
       }
-    });
+    }
+    loadSnippets();
+    if (failures.length > 0) throw new Error(failures[0]);
+    organize.resolveGroup(keepId);
   }
 
   // Set a stage section's open state explicitly (the caller passes the desired
@@ -274,6 +329,14 @@ export default function SnippetsView() {
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [snippets]);
 
+  // Snippets by id, so the redundancy panel can render rows from the ids its groups
+  // carry — and notice the ones that have since disappeared. Must run before the early
+  // returns.
+  const byId = useMemo(
+    () => new Map((snippets ?? []).map((s) => [s.id, s])),
+    [snippets],
+  );
+
   if (loadError) {
     return (
       <Page>
@@ -299,6 +362,10 @@ export default function SnippetsView() {
   // flat, position-sorted library below (the backend does the ordering).
   const proposed = snippets.filter((s) => s.status === "proposed");
   const approved = snippets.filter((s) => s.status === "approved");
+  // What the confirm gate should actually count. Both backend passes skip blank-content
+  // rows, so counting every approved snippet made the gate promise a number the outcome
+  // note then contradicted whenever an unfinished blank card was open.
+  const organizable = approved.filter((s) => s.content.trim() !== "");
 
   return (
     <Page>
@@ -328,43 +395,60 @@ export default function SnippetsView() {
 
         {approved.length >= 2 && (
           <div className={styles.toolbar}>
-            {confirmingReclassify ? (
-              <div className={styles.rescoreConfirm}>
-                <span className={styles.rescoreWarn}>
-                  Re-score all {approved.length}? This overwrites categories you
-                  set by hand.
+            {confirmingOrganize ? (
+              <div className={styles.organizeConfirm}>
+                {/* `role="alert"` because opening this gate replaces the button that had
+                    focus, so without it a screen-reader user gets no indication that a
+                    question appeared at all — only that their button vanished. It states
+                    the count and the overwrite, which are the two things the gate exists
+                    to say. */}
+                <span className={styles.organizeWarn} role="alert">
+                  Organize all {organizable.length}? Re-scores every snippet,
+                  re-groups them by stage, re-tags what each is about, and flags
+                  redundant ones. This overwrites stages you set by hand.
                 </span>
                 <button
                   type="button"
                   className={styles.secondaryBtn}
-                  onClick={() => setConfirmingReclassify(false)}
+                  onClick={cancelOrganize}
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  className={styles.rescoreGoBtn}
-                  onClick={handleReclassify}
+                  className={styles.organizeGoBtn}
+                  onClick={handleOrganize}
+                  // Focus moves here when the gate opens. The <button> that was focused is
+                  // replaced by this <div>, so focus would otherwise fall to <body> and a
+                  // keyboard user would have to Tab from the top of the document — through
+                  // the tab bar — to reach a confirm they just asked for.
+                  ref={organizeGoRef}
                 >
-                  Re-score
+                  Organize
                 </button>
               </div>
             ) : (
               <button
                 type="button"
-                className={styles.rescoreBtn}
-                onClick={() => setConfirmingReclassify(true)}
-                disabled={reclassifying || adding}
+                className={styles.organizeBtn}
+                onClick={() => setConfirmingOrganize(true)}
+                disabled={organizing || adding}
+                ref={organizeBtnRef}
               >
-                {reclassifying ? (
+                {organizing ? (
                   <>
                     <span className={styles.spinner} aria-hidden="true" />
-                    Re-scoring…
+                    {/* Two passes over the whole library can take a while; naming
+                        the current one is the difference between a wait that's
+                        explained and one that reads as a hang. */}
+                    {phase === "checking"
+                      ? "Finding duplicates…"
+                      : "Re-scoring…"}
                   </>
                 ) : (
                   <>
                     <SparkIcon />
-                    Re-score &amp; re-categorize
+                    Organize library
                   </>
                 )}
               </button>
@@ -373,13 +457,46 @@ export default function SnippetsView() {
         )}
 
         {error && <div className={styles.error}>{error}</div>}
-        {reclassifyError && (
-          <div className={styles.error}>{reclassifyError}</div>
-        )}
-        {reclassifyNote && !reclassifying && (
-          <div className={styles.rescoreNote} role="status">
-            {reclassifyNote}
+        {/* Both of these are module state, so they outlive this view — without a way to
+            dismiss them, a failure at 10am greeted every later visit to the tab for the
+            rest of the session, attached to nothing the user had just done. */}
+        {organizeError && (
+          <div className={styles.error}>
+            {organizeError}
+            <button
+              type="button"
+              className={styles.noteDismissBtn}
+              onClick={organize.dismissNote}
+              aria-label="Dismiss this message"
+            >
+              ✕
+            </button>
           </div>
+        )}
+        {organizeNote && !organizing && (
+          <div className={styles.organizeNote} role="status">
+            {organizeNote}
+            <button
+              type="button"
+              className={styles.noteDismissBtn}
+              onClick={organize.dismissNote}
+              aria-label="Dismiss this message"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {groups && !organizing && (
+          <RedundancyPanel
+            groups={groups}
+            byId={byId}
+            selections={selections}
+            onToggle={organize.setSelection}
+            onDelete={handleGroupDelete}
+            onDismissGroup={organize.resolveGroup}
+            onDismissAll={organize.dismissGroups}
+          />
         )}
 
         {snippets.length === 0 ? (
@@ -472,6 +589,13 @@ export default function SnippetsView() {
         )}
 
         <p className={styles.hint}>
+          Each snippet gets a <strong>stage</strong> (when in a thread it fits —
+          you can change this) and a <strong>topic</strong> (what it's about —
+          the AI's read). A draft prefers lines on the topic the conversation is
+          already on, and changes subject only when the thread gives it a reason.
+        </p>
+
+        <p className={styles.hint}>
           Wrap a blank in [brackets] — like{" "}
           <span className={styles.hintTag}>[first name]</span> or{" "}
           <span className={styles.hintTag}>[what they mentioned]</span> — and
@@ -497,6 +621,387 @@ function Page({ children }: { children: React.ReactNode }) {
         </p>
       </header>
       {children}
+    </div>
+  );
+}
+
+/**
+ * The redundancy report from the last organize: groups of snippets the AI judged to say
+ * the same thing, each collapsible down to the version worth keeping.
+ *
+ * Ephemeral and advisory. Nothing here is marked in the database and nothing was deleted
+ * to build it — the backend only reports groups, and every deletion is the user ticking
+ * rows and the ordinary `delete_snippet` running. That asymmetry with the re-score half
+ * of the same click is deliberate: a wrong stage label is a shrug, a wrong deletion is
+ * lost writing.
+ *
+ * The report is a snapshot, and the library keeps moving under it — a background
+ * `snippets://changed`, a delete from a card below, another window. So groups are
+ * rendered from whatever ids they still resolve to, and one left pointing at fewer than
+ * two live snippets isn't a duplicate pair any more and drops out silently.
+ */
+function RedundancyPanel({
+  groups,
+  byId,
+  selections,
+  onToggle,
+  onDelete,
+  onDismissGroup,
+  onDismissAll,
+}: {
+  groups: RedundancyGroup[];
+  byId: Map<number, Snippet>;
+  /** Ticks per group, keyed on `keep_id`. Absent = the group hasn't been touched yet, so
+   *  it shows the model's suggestion (see `defaultTicks`). */
+  selections: Record<number, number[]>;
+  onToggle: (keepId: number, ids: number[]) => void;
+  onDelete: (keepId: number, ids: number[]) => Promise<void>;
+  onDismissGroup: (keepId: number) => void;
+  onDismissAll: () => void;
+}) {
+  // Resolve each member to a live row, and keep it ONLY if that row still holds the text
+  // the model judged. An existence check is not enough: `snippets.id` is a plain SQLite
+  // rowid alias, so deleting the highest-id snippet hands its id to the next insert —
+  // which can be a background propose pass, with no action from the user at all. Without
+  // the content compare, a group could come back to life pointing at an unrelated new
+  // snippet and pre-tick a real one for deletion on a false premise. The same compare
+  // also drops a member that was simply edited since the report was made.
+  const live = groups
+    .map((group) => ({
+      group,
+      items: group.members
+        .map((m) => {
+          const snippet = byId.get(m.id);
+          return snippet && snippet.content.trim() === m.analyzed.trim()
+            ? snippet
+            : undefined;
+        })
+        .filter((s): s is Snippet => s !== undefined),
+    }))
+    .filter(({ items }) => items.length >= 2);
+
+  // Resolve each group's ticks once per store change, so the array identity handed to a card
+  // is stable. `defaultTicks` builds a fresh array, and passing that straight down would
+  // change identity on every render — churning the card's derived Set and re-running its
+  // reprieve effect each time.
+  const ticks = useMemo(() => {
+    const byGroup = new Map<number, readonly number[]>();
+    for (const g of groups) {
+      byGroup.set(g.keep_id, selections[g.keep_id] ?? organize.defaultTicks(g));
+    }
+    return byGroup;
+  }, [groups, selections]);
+
+  if (live.length === 0) return null;
+
+  return (
+    <section className={styles.dupePanel} aria-label="Possible redundancy">
+      <div className={styles.dupePanelHead}>
+        <h2 className={styles.dupePanelTitle}>
+          {live.length === 1
+            ? "1 group says the same thing twice"
+            : `${live.length} groups say the same thing twice`}
+        </h2>
+        <button
+          type="button"
+          className={styles.dupeDismissBtn}
+          onClick={onDismissAll}
+        >
+          Dismiss
+        </button>
+      </div>
+
+      <ul className={styles.dupeGroups}>
+        {live.map(({ group, items }, i) => (
+          <li key={group.keep_id}>
+            <RedundancyGroupCard
+              group={group}
+              items={items}
+              index={i}
+              selected={ticks.get(group.keep_id) ?? []}
+              onToggle={onToggle}
+              onDelete={onDelete}
+              onDismiss={() => onDismissGroup(group.keep_id)}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * One redundant group: the shared point it makes, and a tickable row per snippet in it.
+ *
+ * A tick means "delete this one", and everything except the AI's suggested keeper starts
+ * ticked — so the default reading of a group is already the action you want ("collapse
+ * this to its best line") and the common case is a single click. The suggestion is only
+ * a starting point: retick freely.
+ *
+ * The one thing the UI won't let you do is empty a group. Deleting every version of a
+ * point isn't collapsing redundancy, it's losing the point — so whenever a single
+ * snippet is left unticked, its checkbox locks rather than warning about it afterwards.
+ */
+function RedundancyGroupCard({
+  group,
+  items,
+  index,
+  selected: selectedIds,
+  onToggle,
+  onDelete,
+  onDismiss,
+}: {
+  group: RedundancyGroup;
+  items: Snippet[];
+  /** Position in the panel, for the entrance stagger. */
+  index: number;
+  /** Ticked-for-deletion ids, owned by `organizeRun` rather than by this card — a tab
+   *  switch remounts it, and holding the user's choices here silently reverted them to the
+   *  pre-ticked default. */
+  selected: readonly number[];
+  onToggle: (keepId: number, ids: number[]) => void;
+  onDelete: (keepId: number, ids: number[]) => Promise<void>;
+  onDismiss: () => void;
+}) {
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Two-step gate on the delete, matching every other destructive control here.
+  const [confirming, setConfirming] = useState(false);
+  // Ties the group's reason to each checkbox for screen readers — the rows are the
+  // group's only visible structure, so without this the shared point isn't announced.
+  const reasonId = useId();
+  // Synchronous re-entry guard (state updates are async).
+  const busyRef = useRef(false);
+  // Focus follows the confirm swap in both directions — see the `key`s on the footer.
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmDeleteRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirming) confirmDeleteRef.current?.focus();
+  }, [confirming]);
+
+  function cancelConfirm() {
+    setConfirming(false);
+    deleteTriggerRef.current?.focus();
+  }
+
+  // `selected` is the user's raw ticks. `doomed` is what will actually be deleted, and
+  // it's what the whole card renders from — so a row shown ticked is always exactly a
+  // row the Delete button removes.
+  //
+  // Both derive from `items` rather than from `selected` alone, because a snippet
+  // deleted elsewhere leaves its id behind in `selected`: sending that on would fail
+  // with "Snippet not found" over a row that's already gone.
+  const ticked = items.filter((s) => selected.has(s.id));
+
+  // A group must always keep one row, and the checkbox lock alone can't guarantee that.
+  // The lock only ever guarded the "one row left unticked" case, but `items` shrinks
+  // when a snippet is deleted from its own card below (or in another window) while this
+  // panel is open — so if the row that was holding the group open is the one that
+  // vanished, the count goes straight from one unticked to zero, never passing through
+  // the case the lock watches, and every remaining row is ticked.
+  //
+  // So the survivor is guaranteed here instead: with nothing left unticked, the last row
+  // standing is reprieved — it un-ticks itself and locks. `doomed.length < items.length`
+  // then holds unconditionally, which is the actual invariant, rather than something the
+  // UI merely tries not to violate.
+  const reprieved =
+    items.length > 0 && ticked.length === items.length
+      ? (items.find((s) => s.id === group.keep_id) ?? items[0])
+      : null;
+  const doomed = ticked.filter((s) => s.id !== reprieved?.id);
+  const kept = items.filter((s) => !doomed.some((d) => d.id === s.id));
+  const lockedId = kept.length === 1 ? kept[0].id : null;
+
+  // Commit the reprieve to `selected`, rather than leaving it a mask over a tick that's
+  // still set underneath. Both halves have a job: deriving it above is what makes the
+  // "one row always survives" invariant hold on the very first render, and clearing the
+  // tick here is what stops the reprieve from being revocable — otherwise the protection
+  // lasts only while every row is ticked, and unticking some *other* row would drop that
+  // condition and silently re-arm the row the UI had just marked "Kept".
+  //
+  // Keyed on the id (a primitive), not the object, so this can't re-fire on identity
+  // churn: removing the tick makes `reprieved` null on the next render, and the guard
+  // returns `prev` unchanged once there's nothing left to clear.
+  const reprievedId = reprieved?.id;
+  useEffect(() => {
+    if (reprievedId === undefined || !selected.has(reprievedId)) return;
+    onToggle(
+      group.keep_id,
+      [...selected].filter((id) => id !== reprievedId),
+    );
+  }, [reprievedId, selected, onToggle, group.keep_id]);
+
+  function toggle(id: number) {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onToggle(group.keep_id, [...next]);
+  }
+
+  async function handleDelete() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await onDelete(
+        group.keep_id,
+        doomed.map((s) => s.id),
+      );
+      // Success retires the group, unmounting this card — no state to reset.
+    } catch (err) {
+      setError(errorMessage(err));
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className={styles.dupeGroup}
+      data-busy={busy}
+      // Stagger the entrance, capped so a long report doesn't crawl in.
+      style={{ animationDelay: `${Math.min(index * 40, 200)}ms` }}
+    >
+      {/* A group with no reason gets a line anyway. The model is allowed to return an empty
+          one, and omitting the element gave the group that couldn't be explained LESS
+          framing than an explained one — bare pre-ticked rows and a Delete button, with no
+          description tied to the checkboxes at all. The friction should not be inversely
+          proportional to the justification. */}
+      <p
+        className={group.reason ? styles.dupeReason : styles.dupeReasonMissing}
+        id={reasonId}
+      >
+        {group.reason || "No reason given — check these carefully."}
+      </p>
+
+      <ul className={styles.dupeRows}>
+        {items.map((s) => {
+          // From `doomed`, never `selected` — so a reprieved row visibly un-ticks
+          // itself rather than sitting ticked while surviving the delete.
+          const ticked = doomed.some((d) => d.id === s.id);
+          const locked = s.id === lockedId;
+          return (
+            <li key={s.id}>
+              <label
+                className={styles.dupeRow}
+                data-ticked={ticked || undefined}
+                data-locked={locked || undefined}
+              >
+                <input
+                  type="checkbox"
+                  className={styles.dupeCheck}
+                  checked={ticked}
+                  disabled={busy || locked}
+                  onChange={() => toggle(s.id)}
+                  // NO `aria-label` here, deliberately. An explicit label on the input
+                  // wins over the wrapping <label>'s text, which would reduce the whole
+                  // row to "Delete Untitled snippet" — and since most snippets are
+                  // untitled, every row in the group would announce identically, hiding
+                  // the content that is the only way to judge which version to keep.
+                  // The <label> supplies the name; the reason describes the group.
+                  // Unconditional: the reason line always renders now, and a reasonless
+                  // group is exactly the one whose checkboxes most need a description.
+                  aria-describedby={reasonId}
+                />
+                <span className={styles.dupeBody}>
+                  <span className={styles.dupeName}>
+                    {/* The name gets its own span so the struck-through treatment
+                        can be scoped to it: `text-decoration` propagates to
+                        descendants and a child can't opt out, so striking the
+                        whole row would strike the pills beside it too. */}
+                    <span className={styles.dupeNameText}>
+                      {s.name.trim() || "Untitled snippet"}
+                    </span>
+                    {s.id === group.keep_id && (
+                      <span className={styles.dupeSuggest}>
+                        AI suggests keeping
+                      </span>
+                    )}
+                    {locked && (
+                      <span className={styles.dupeLocked}>
+                        Kept — a group can't be emptied
+                      </span>
+                    )}
+                  </span>
+                  <span className={styles.dupeContent}>
+                    <BlankedContent content={s.content} />
+                  </span>
+                </span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+
+      {error && <div className={styles.cardError}>{error}</div>}
+
+      {/* Deleting here needs the same two-step gate as deleting a single snippet from
+          its own card (⋯ → Delete → confirm) and as Organize itself. It is the most
+          destructive control in the view — the rows arrive pre-ticked from a model's
+          judgement, so an unconfirmed click would act on a default the user never
+          chose, and there is no undo anywhere in the app. */}
+      {/* Distinct `key`s per branch on purpose. Without them React reconciles these
+          children by index, and index 1 is "Delete N" before the swap and "Cancel" after —
+          the same DOM node, so the control under the user's focus silently changed identity
+          from destructive to safe. A second Enter then cancelled, making the delete appear
+          to do nothing, twice, with no announcement either time. */}
+      <div className={styles.dupeFoot}>
+        {confirming ? (
+          <>
+            {/* Announced, because the swap above replaces the focused control: otherwise
+                the only signal that a confirmation appeared is visual. */}
+            <span key="warn" className={styles.dupeWarn} role="alert">
+              Delete {doomed.length} of these {items.length}? This can't be undone.
+            </span>
+            <button
+              key="cancel"
+              type="button"
+              className={styles.secondaryBtn}
+              onClick={cancelConfirm}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              key="confirm-delete"
+              type="button"
+              className={styles.deleteBtn}
+              onClick={() => void handleDelete()}
+              disabled={busy}
+              ref={confirmDeleteRef}
+            >
+              {busy ? "Deleting…" : "Delete"}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              key="keep-all"
+              type="button"
+              className={styles.secondaryBtn}
+              onClick={onDismiss}
+              disabled={busy}
+            >
+              Keep all
+            </button>
+            {/* The card's own delete button, reused as-is — same affordance, and it
+                already carries the danger treatment, disabled state, press feedback
+                and reduced-motion handling. */}
+            <button
+              key="delete-trigger"
+              type="button"
+              className={styles.deleteBtn}
+              onClick={() => setConfirming(true)}
+              disabled={busy || doomed.length === 0}
+              ref={deleteTriggerRef}
+            >
+              {`Delete ${doomed.length}`}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -714,17 +1219,52 @@ function SnippetCard({
           {error && <div className={styles.cardError}>{error}</div>}
 
           <div className={styles.cardFoot}>
-            <CategoryChip
-              snippet={snippet}
-              categories={categories}
-              onSet={onSetCategory}
-              disabled={deleting}
-            />
+            <div className={styles.chips}>
+              <CategoryChip
+                snippet={snippet}
+                categories={categories}
+                onSet={onSetCategory}
+                disabled={deleting}
+              />
+              <TopicChip topic={snippet.topic} />
+            </div>
             <SavedIndicator visible={showSaved} />
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Snippet content with its blanks rendered as slots rather than literal brackets.
+ *
+ * A fragment, not a wrapper: the two callers frame it differently (a proposal's body is
+ * a <p>, a redundancy row's is a <span>), so each keeps its own element and only the
+ * part-mapping is shared. Both places show unapproved or about-to-be-deleted text, and
+ * both judgements — is this line reusable, is this the version to keep — depend on
+ * seeing which words are the founder's own and which get filled in later.
+ */
+function BlankedContent({ content }: { content: string }) {
+  return (
+    <>
+      {splitOnBlanks(content).map((part, i) =>
+        part.kind === "blank" ? (
+          <span key={i} className={styles.blank}>
+            {/* The dashed pill says "this gets filled in" visually and nowhere else — a
+                border isn't in the accessibility tree, so stripping the literal brackets
+                left "Hi first name, we're SOC2 certified" announcing identically to a
+                snippet that says exactly that. Both judgements this component supports
+                turn on that distinction, and two group members differing only in where
+                the blank sits used to read the same. */}
+            <span className={styles.srOnly}>blank: </span>
+            {part.label}
+          </span>
+        ) : (
+          part.value
+        ),
+      )}
+    </>
   );
 }
 
@@ -766,6 +1306,30 @@ function SparkIcon() {
         fill="currentColor"
       />
     </svg>
+  );
+}
+
+/**
+ * What a snippet is about, beside the stage it belongs to.
+ *
+ * Read-only on purpose, and styled a step quieter than the stage chip: the stage is the
+ * axis you organize by and set by hand, the topic is the AI's read of the subject. Making
+ * both look equally editable would misrepresent which one you control.
+ *
+ * Renders nothing when there's no topic. A blank topic is a normal, expected answer — a
+ * line like "worth a quick call?" has no subject — so an empty slot is the right treatment
+ * rather than a "＋ Topic" affordance that implies something is missing.
+ */
+function TopicChip({ topic }: { topic: string }) {
+  const label = topic.trim();
+  if (!label) return null;
+  return (
+    <span
+      className={styles.topicChip}
+      title="What this snippet is about — the AI picks this, and a draft prefers staying on the thread's current topic"
+    >
+      {label}
+    </span>
   );
 }
 
@@ -894,6 +1458,11 @@ function CategoryChip({
  * user can then edit it freely. Both actions unmount this card on success, so like
  * the delete flow we reset state only on failure (a `finally` reset would fire on
  * an unmounted component).
+ *
+ * A proposal may carry blanks (`[first name]`) where a detail was tied to one
+ * person. Those render as slots rather than as literal brackets: approving is a
+ * judgement about whether the line is reusable, and that judgement depends on seeing
+ * which parts are the founder's own words and which get filled in later.
  */
 function ProposedCard({
   snippet,
@@ -928,6 +1497,7 @@ function ProposedCard({
   }
 
   const name = snippet.name.trim();
+  const blanked = hasBlank(snippet.content);
 
   return (
     <div className={styles.proposed} data-busy={busy !== null}>
@@ -950,13 +1520,17 @@ function ProposedCard({
         {name && <span className={styles.proposedName}>{name}</span>}
       </div>
 
-      <p className={styles.proposedContent}>{snippet.content}</p>
+      <p className={styles.proposedContent}>
+        <BlankedContent content={snippet.content} />
+      </p>
 
       {error && <div className={styles.cardError}>{error}</div>}
 
       <div className={styles.proposedFoot}>
         <span className={styles.proposedHint}>
-          Spotted in a message you sent
+          {blanked
+            ? "Blanks fill in per prospect"
+            : "Spotted in a message you sent"}
         </span>
         <div className={styles.proposedActions}>
           <button
