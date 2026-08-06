@@ -11,7 +11,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::model::Prospect;
 
 const COLUMNS: &str = "id, name, linkedin_url, headline, customer_id, stage_id, \
-     messages_sent, awaiting_reply, note, created_at";
+     messages_sent, awaiting_reply, last_outreach_at, suggested_stage_id, \
+     suggested_reason, note, created_at";
 
 /// Subquery yielding the pipeline's messaging (first) stage id. There is one
 /// pipeline now, so this takes no owner — a freshly captured prospect always has
@@ -22,6 +23,12 @@ const MESSAGING_STAGE: &str =
 fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Prospect>> {
     let sql = format!("SELECT {COLUMNS} FROM prospects WHERE id = ?1");
     conn.query_row(&sql, [id], Prospect::from_row).optional()
+}
+
+/// One prospect by id, for callers outside this feature (the advance analyzer
+/// needs their stage and customer before it can judge a thread). Read-only.
+pub(crate) fn find(conn: &Connection, id: i64) -> rusqlite::Result<Option<Prospect>> {
+    get(conn, id)
 }
 
 /// Whether a prospect with this `linkedin_url` already exists. Lets the caller
@@ -103,19 +110,66 @@ pub(crate) fn upsert(
 /// Move a prospect to `stage_id`. The stage must exist (enforced in SQL) —
 /// otherwise no row changes and this returns `None`, which the command surfaces
 /// as an error. With one shared pipeline there's no per-owner check left to make.
+///
+/// Any move clears a pending advance suggestion, whatever its target. The
+/// suggestion was reasoning about the stage the prospect was in a moment ago; the
+/// instant they're somewhere else it's stale, and leaving it up would offer to
+/// re-advance someone you just moved by hand — or, worse, keep offering a move
+/// you already took.
 pub(super) fn set_stage(
     conn: &Connection,
     id: i64,
     stage_id: i64,
 ) -> rusqlite::Result<Option<Prospect>> {
     let changed = conn.execute(
-        "UPDATE prospects SET stage_id = ?1
+        "UPDATE prospects
+         SET stage_id = ?1, suggested_stage_id = NULL, suggested_reason = ''
          WHERE id = ?2 AND EXISTS (SELECT 1 FROM stages WHERE stages.id = ?1)",
         params![stage_id, id],
     )?;
     if changed == 0 {
         return Ok(None);
     }
+    get(conn, id)
+}
+
+/// Record the analyzer's verdict: this prospect looks ready for `stage_id`,
+/// because `reason`. Overwrites any previous pending suggestion — the newest
+/// read of the thread supersedes an older one.
+///
+/// Guarded in SQL against suggesting the stage the prospect is *already* in,
+/// which would render a card offering to move it nowhere. That's a cheap
+/// backstop for a confused model rather than an expected case; the analyzer only
+/// ever asks about the next stage.
+pub(crate) fn suggest_stage(
+    conn: &Connection,
+    id: i64,
+    stage_id: i64,
+    reason: &str,
+) -> rusqlite::Result<Option<Prospect>> {
+    let changed = conn.execute(
+        "UPDATE prospects
+         SET suggested_stage_id = ?1, suggested_reason = ?2
+         WHERE id = ?3
+           AND stage_id IS NOT ?1
+           AND EXISTS (SELECT 1 FROM stages WHERE stages.id = ?1)",
+        params![stage_id, reason, id],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    get(conn, id)
+}
+
+/// Retract a pending suggestion without moving anyone — the "dismiss" half of
+/// the card's accept/dismiss pair. Idempotent: dismissing a prospect with no
+/// suggestion is a no-op that still returns the row, so a double-click can't
+/// turn into an error.
+pub(super) fn clear_suggestion(conn: &Connection, id: i64) -> rusqlite::Result<Option<Prospect>> {
+    conn.execute(
+        "UPDATE prospects SET suggested_stage_id = NULL, suggested_reason = '' WHERE id = ?1",
+        [id],
+    )?;
     get(conn, id)
 }
 
@@ -325,6 +379,93 @@ mod tests {
             set_customer(&conn, p.id, Some(9999)).is_err(),
             "the foreign key rejects a customer profile that doesn't exist"
         );
+    }
+
+    #[test]
+    fn suggest_stage_records_the_target_and_reason() {
+        let conn = setup();
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        assert_eq!(p.suggested_stage_id, None, "a fresh prospect has no suggestion");
+        assert_eq!(p.suggested_reason, "");
+
+        let suggested = suggest_stage(&conn, p.id, stages[1], "they asked for a call")
+            .unwrap()
+            .unwrap();
+        assert_eq!(suggested.suggested_stage_id, Some(stages[1]));
+        assert_eq!(suggested.suggested_reason, "they asked for a call");
+        assert_eq!(suggested.stage_id, Some(stages[0]), "suggesting never moves them");
+
+        // A newer read of the thread supersedes the older suggestion.
+        let again = suggest_stage(&conn, p.id, stages[2], "they signed").unwrap().unwrap();
+        assert_eq!(again.suggested_stage_id, Some(stages[2]));
+        assert_eq!(again.suggested_reason, "they signed");
+    }
+
+    #[test]
+    fn suggest_stage_refuses_the_stage_theyre_already_in_or_one_that_doesnt_exist() {
+        let conn = setup();
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+
+        // A card offering to move someone where they already are is not a card.
+        assert!(suggest_stage(&conn, p.id, stages[0], "hm").unwrap().is_none());
+        assert!(suggest_stage(&conn, p.id, 9999, "hm").unwrap().is_none());
+        assert!(suggest_stage(&conn, 9999, stages[1], "hm").unwrap().is_none());
+        assert_eq!(find(&conn, p.id).unwrap().unwrap().suggested_stage_id, None);
+    }
+
+    /// Moving someone — by hand OR by accepting the suggestion — invalidates the
+    /// analyzer's read of where they were. The card must not keep offering it.
+    #[test]
+    fn any_stage_move_clears_a_pending_suggestion() {
+        let conn = setup();
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        suggest_stage(&conn, p.id, stages[1], "they asked for a call").unwrap();
+
+        // Accepting it: move to the suggested stage.
+        let accepted = set_stage(&conn, p.id, stages[1]).unwrap().unwrap();
+        assert_eq!(accepted.stage_id, Some(stages[1]));
+        assert_eq!(accepted.suggested_stage_id, None);
+        assert_eq!(accepted.suggested_reason, "");
+
+        // A move to some OTHER stage clears it too — the suggestion reasoned
+        // about a position they've now left.
+        suggest_stage(&conn, p.id, stages[2], "onboarding time").unwrap();
+        let elsewhere = set_stage(&conn, p.id, stages[3]).unwrap().unwrap();
+        assert_eq!(elsewhere.suggested_stage_id, None);
+    }
+
+    #[test]
+    fn clear_suggestion_dismisses_without_moving_and_is_idempotent() {
+        let conn = setup();
+        let stages = stage_ids(&conn);
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        suggest_stage(&conn, p.id, stages[1], "they asked for a call").unwrap();
+
+        let dismissed = clear_suggestion(&conn, p.id).unwrap().unwrap();
+        assert_eq!(dismissed.suggested_stage_id, None);
+        assert_eq!(dismissed.suggested_reason, "");
+        assert_eq!(dismissed.stage_id, Some(stages[0]), "dismissing never moves them");
+
+        // A second dismissal is a no-op, not an error — a double-click is cheap.
+        assert!(clear_suggestion(&conn, p.id).unwrap().is_some());
+        assert!(clear_suggestion(&conn, 9999).unwrap().is_none());
+    }
+
+    /// Re-tagging the customer profile must not disturb a pending suggestion:
+    /// the analyzer reasons about the STAGE goal, which is customer-independent.
+    #[test]
+    fn retagging_the_customer_leaves_a_suggestion_standing() {
+        let conn = setup();
+        let stages = stage_ids(&conn);
+        let customer = seed_customer(&conn, "Agencies");
+        let p = upsert(&conn, "Ada", "https://li/ada", "", None, "").unwrap();
+        suggest_stage(&conn, p.id, stages[1], "they asked for a call").unwrap();
+
+        let retagged = set_customer(&conn, p.id, Some(customer)).unwrap().unwrap();
+        assert_eq!(retagged.suggested_stage_id, Some(stages[1]));
     }
 
     #[test]

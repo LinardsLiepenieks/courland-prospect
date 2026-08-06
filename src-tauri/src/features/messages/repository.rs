@@ -43,11 +43,20 @@ pub(crate) struct NewOutgoing {
 }
 
 /// The result of storing a batch: the counts the HTTP response reports, plus the
-/// genuinely-new outgoing messages the caller fires snippet proposal on.
+/// two fan-out sets the caller fires background work on.
 pub(crate) struct StoreOutcome {
     pub stored: usize,
     pub skipped: usize,
+    /// Genuinely-new OUTGOING messages — what snippet proposal analyzes.
     pub new_outgoing: Vec<NewOutgoing>,
+    /// Prospects that gained at least one genuinely-new message in EITHER
+    /// direction — what the advance analyzer re-reads. Deliberately wider than
+    /// `new_outgoing`: the evidence that a stage's goal has been met usually
+    /// arrives in *their* reply ("Thursday works"), so watching only our own
+    /// sends would leave a booked meeting sitting in the messaging column until
+    /// we happened to write again. Deduped, so a batch carrying six messages for
+    /// one person triggers one analysis.
+    pub touched_prospects: Vec<i64>,
 }
 
 /// Store a whole captured batch and refresh the affected prospects' derived
@@ -73,6 +82,10 @@ pub(crate) fn store_batch(
     let mut skipped = 0usize;
     let mut new_outgoing = Vec::new();
     let mut affected = HashSet::new();
+    // Insertion-ordered so the analyzer processes prospects in the order their
+    // threads appeared in the batch; the set guards against duplicates.
+    let mut touched_prospects = Vec::new();
+    let mut touched_seen = HashSet::new();
 
     for item in items {
         if item.linkedin_url.is_empty() || item.li_key.is_empty() {
@@ -86,13 +99,17 @@ pub(crate) fn store_batch(
                 // worth proposing snippets from.
                 let is_new = !message_exists(conn, pid, item.li_key)?;
                 store(conn, pid, item.li_key, item.body, item.sent_at, item.direction)?;
-                if is_new && item.direction != INCOMING {
-                    let body = item.body.trim();
-                    if !body.is_empty() {
+                if is_new && !item.body.trim().is_empty() {
+                    if item.direction != INCOMING {
                         new_outgoing.push(NewOutgoing {
                             prospect_id: pid,
-                            body: body.to_string(),
+                            body: item.body.trim().to_string(),
                         });
+                    }
+                    // Either direction is fresh evidence about where the thread
+                    // stands, so both feed the advance analyzer.
+                    if touched_seen.insert(pid) {
+                        touched_prospects.push(pid);
                     }
                 }
                 affected.insert(pid);
@@ -105,7 +122,7 @@ pub(crate) fn store_batch(
     for pid in &affected {
         recompute_derived(conn, *pid)?;
     }
-    Ok(StoreOutcome { stored, skipped, new_outgoing })
+    Ok(StoreOutcome { stored, skipped, new_outgoing, touched_prospects })
 }
 
 /// Whether a message with this `(prospect_id, li_key)` is already stored — the
@@ -171,13 +188,53 @@ fn store(
     Ok(())
 }
 
+/// The expression that derives `last_outreach_at` from a set of outgoing message
+/// rows — "when did we last actually write to this person".
+///
+/// It prefers the message's scraped `sent_at` and falls back to `created_at` (our
+/// capture time). Naively this looks backwards: `created_at` is always
+/// `datetime('now')` in one known format, while `sent_at` is a nullable,
+/// free-form LinkedIn `<time datetime>` attribute. But capture time is *wrong* on
+/// the path that matters most. Adding someone to prospects posts their whole
+/// visible thread at once (the extension's dedup set is per-mount, so a first
+/// capture is a full backfill), and every one of those rows is stamped `now` —
+/// so a thread you last touched in May would grade as "messaged today", hiding
+/// exactly the person the staleness feature exists to surface.
+///
+/// Both hazards of trusting `sent_at` are handled in SQL rather than assumed
+/// away:
+///   - **Unparseable or absent.** `datetime(x)` returns NULL for anything SQLite
+///     can't read (a relative string like "2 weeks ago", a bare "Jul 12", or a
+///     NULL), and normalizes everything it *can* read to exactly
+///     `datetime('now')`'s `YYYY-MM-DD HH:MM:SS` — so surviving values are
+///     directly comparable with `created_at` and with each other, and `MAX()`
+///     never compares mixed shapes.
+///   - **In the future.** A skewed clock or a garbled scrape could otherwise
+///     park a prospect permanently in the "fresh" band, which is the same failure
+///     this expression exists to fix. A message cannot have been sent after we
+///     captured it, so anything later than `created_at` is rejected in favour of
+///     it.
+///
+/// Kept as a const because migration 0028 backfills the same column and the two
+/// MUST agree — an upgraded database and a freshly-recomputed one disagreeing
+/// about the staleness clock would be invisible and permanent. Pinned by
+/// `migration_0028_backfill_matches_recompute` below.
+pub(crate) const LAST_OUTREACH_EXPR: &str = "MAX(CASE \
+     WHEN datetime(sent_at) IS NOT NULL AND datetime(sent_at) <= created_at \
+     THEN datetime(sent_at) ELSE created_at END)";
+
 /// Recompute a prospect's derived state from its stored messages — the single
-/// source of truth for both facts. `messages_sent` counts outgoing messages;
+/// source of truth for all three facts. `messages_sent` counts outgoing messages;
 /// `awaiting_reply` is whether the prospect's **newest** message is incoming
-/// (they replied and we haven't answered). "Newest" is the greatest `id`:
-/// insertion order tracks the extension's top-to-bottom (chronological) scrape,
-/// and later captures always insert higher. `COALESCE` keeps a prospect with no
-/// messages at 0. Called once per affected prospect after storing a batch.
+/// (they replied and we haven't answered); `last_outreach_at` is when we last
+/// wrote to them (see [`LAST_OUTREACH_EXPR`]), which drives the board's staleness
+/// colors. "Newest" is the greatest `id`: insertion order tracks the extension's
+/// top-to-bottom (chronological) scrape, and later captures always insert higher.
+/// `COALESCE` keeps a prospect with no messages at 0. Called once per affected
+/// prospect after storing a batch.
+///
+/// `last_outreach_at` is NULL when we've never written to them, which the UI
+/// reads as "age them from when they were captured".
 fn recompute_derived(conn: &Connection, prospect_id: i64) -> rusqlite::Result<()> {
     // Direction literals come from the module consts so this query can't drift
     // from `store`'s vocabulary.
@@ -190,11 +247,53 @@ fn recompute_derived(conn: &Connection, prospect_id: i64) -> rusqlite::Result<()
                  (SELECT direction = '{INCOMING}' FROM messages
                   WHERE prospect_id = ?1
                   ORDER BY id DESC LIMIT 1),
-                 0)
+                 0),
+             last_outreach_at =
+                 (SELECT {LAST_OUTREACH_EXPR} FROM messages
+                  WHERE prospect_id = ?1 AND direction = '{OUTGOING}')
          WHERE id = ?1"
     );
     conn.execute(&sql, [prospect_id])?;
     Ok(())
+}
+
+/// One stored message, as the advance analyzer reads it back. `incoming` mirrors
+/// the stored direction; the body is whatever the last good capture left.
+pub(crate) struct StoredMessage {
+    pub incoming: bool,
+    pub body: String,
+}
+
+/// A prospect's captured thread, oldest to newest, capped at the most recent
+/// `limit` messages. This is the first *read* path in a slice that was otherwise
+/// write-only: the advance analyzer judges a thread against its stage's goal, and
+/// asking the extension to re-scrape for that would tie a background pass to a
+/// browser that may not even have the conversation open.
+///
+/// Ordered by `id` for the same reason `recompute_derived` trusts it — insertion
+/// order tracks the chronological scrape. The cap takes the NEWEST `limit` rows
+/// (hence the inner DESC, re-sorted ascending) because a stage decision turns on
+/// how a conversation is currently going, not how it opened; a long thread would
+/// otherwise push the decisive last exchange out of the prompt.
+pub(crate) fn recent_for_prospect(
+    conn: &Connection,
+    prospect_id: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<StoredMessage>> {
+    let sql = format!(
+        "SELECT incoming, body FROM (
+             SELECT direction = '{INCOMING}' AS incoming, body, id
+             FROM messages
+             WHERE prospect_id = ?1 AND body != ''
+             ORDER BY id DESC
+             LIMIT ?2
+         ) ORDER BY id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![prospect_id, limit as i64], |row| {
+        Ok(StoredMessage { incoming: row.get("incoming")?, body: row.get("body")? })
+    })?;
+    rows.collect()
 }
 
 #[cfg(test)]
@@ -383,6 +482,226 @@ mod tests {
         // They reply again — toggles back on.
         store_batch(&conn, &[incoming("https://li/ada", "r2", "perfect")]).unwrap();
         assert!(awaiting_reply(&conn, id), "a fresh reply re-sets awaiting_reply");
+    }
+
+    fn last_outreach_at(conn: &Connection, prospect_id: i64) -> Option<String> {
+        conn.query_row(
+            "SELECT last_outreach_at FROM prospects WHERE id = ?1",
+            [prospect_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The migration that introduced `last_outreach_at` backfills it with a
+    /// hand-written copy of [`LAST_OUTREACH_EXPR`]. If the two drift, an upgraded
+    /// database and a freshly-recomputed one grade staleness differently — silent,
+    /// permanent, and invisible in any UI. Pin them together so editing one
+    /// without the other fails here.
+    #[test]
+    fn migration_0028_backfill_matches_recompute() {
+        const SQL: &str =
+            include_str!("../../database/migrations/0028_prospect_cycle_state.sql");
+        // Compare whitespace-insensitively: the const is line-continued for
+        // rustfmt, the SQL is formatted for a human reading the migration.
+        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squash(SQL).contains(&squash(LAST_OUTREACH_EXPR)),
+            "0028's backfill must use the same expression as recompute_derived:\n{}",
+            squash(LAST_OUTREACH_EXPR)
+        );
+    }
+
+    /// The defect this expression exists for. Capturing a prospect posts their
+    /// whole visible thread at once, and every row is stamped with the capture
+    /// time — so reading `created_at` made a months-old conversation grade as
+    /// "messaged today", which is the one reading that hides someone going cold.
+    #[test]
+    fn a_backfilled_old_thread_ages_from_when_it_was_sent_not_captured() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
+
+        // A first capture: the message was sent in May, captured just now.
+        store_batch(
+            &conn,
+            &[CapturedMessage {
+                linkedin_url: "https://li/ada",
+                li_key: "old",
+                body: "worth 15 minutes?",
+                sent_at: Some("2026-05-01T09:00:00.000Z"),
+                direction: OUTGOING,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            last_outreach_at(&conn, id).as_deref(),
+            Some("2026-05-01 09:00:00"),
+            "the scraped send time wins over the capture time"
+        );
+    }
+
+    /// `sent_at` is a raw DOM attribute, so it is only trusted when SQLite can
+    /// actually read it AND it isn't later than the capture — a future timestamp
+    /// would park the prospect in the fresh band forever, the same failure the
+    /// expression is meant to fix.
+    #[test]
+    fn an_unreadable_or_future_sent_at_falls_back_to_capture_time() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+
+        for (key, sent_at, label) in [
+            ("junk", Some("2 weeks ago"), "a relative string"),
+            ("part", Some("Jul 12"), "an unparseable fragment"),
+            ("none", None, "no timestamp at all"),
+            ("soon", Some("2099-01-01T00:00:00Z"), "a future timestamp"),
+        ] {
+            let url = format!("https://li/{key}");
+            let id = seed_prospect(&conn, &url, stages[0]);
+            store_batch(
+                &conn,
+                &[CapturedMessage {
+                    linkedin_url: &url,
+                    li_key: key,
+                    body: "hi",
+                    sent_at,
+                    direction: OUTGOING,
+                }],
+            )
+            .unwrap();
+
+            let captured: String = conn
+                .query_row(
+                    "SELECT created_at FROM messages WHERE li_key = ?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                last_outreach_at(&conn, id).as_deref(),
+                Some(captured.as_str()),
+                "{label} must fall back to the capture time"
+            );
+        }
+    }
+
+    /// `last_outreach_at` means "when did YOU last write to them" — so only
+    /// outgoing messages move it, and it tracks the newest one.
+    #[test]
+    fn last_outreach_follows_our_newest_outgoing_message_only() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
+
+        // Never written to them yet.
+        store_batch(&conn, &[incoming("https://li/ada", "r1", "hi")]).unwrap();
+        assert_eq!(
+            last_outreach_at(&conn, id),
+            None,
+            "their message is not our outreach"
+        );
+
+        store(&conn, id, "o1", "hello", None, OUTGOING).unwrap();
+        conn.execute(
+            "UPDATE messages SET created_at = '2026-07-01 09:00:00' WHERE li_key = 'o1'",
+            [],
+        )
+        .unwrap();
+        recompute_derived(&conn, id).unwrap();
+        assert_eq!(last_outreach_at(&conn, id).as_deref(), Some("2026-07-01 09:00:00"));
+
+        // A later reply from them must not push the clock forward — that would
+        // make an unanswered thread look freshly worked.
+        store(&conn, id, "r2", "sounds good", None, INCOMING).unwrap();
+        conn.execute(
+            "UPDATE messages SET created_at = '2026-07-20 09:00:00' WHERE li_key = 'r2'",
+            [],
+        )
+        .unwrap();
+        recompute_derived(&conn, id).unwrap();
+        assert_eq!(
+            last_outreach_at(&conn, id).as_deref(),
+            Some("2026-07-01 09:00:00"),
+            "their reply must not reset our outreach clock"
+        );
+
+        // Our answer does.
+        store(&conn, id, "o2", "great", None, OUTGOING).unwrap();
+        conn.execute(
+            "UPDATE messages SET created_at = '2026-07-21 09:00:00' WHERE li_key = 'o2'",
+            [],
+        )
+        .unwrap();
+        recompute_derived(&conn, id).unwrap();
+        assert_eq!(last_outreach_at(&conn, id).as_deref(), Some("2026-07-21 09:00:00"));
+    }
+
+    /// The advance analyzer runs on new messages in EITHER direction — a booked
+    /// meeting usually arrives in their reply, not our send. Deduped per prospect
+    /// so one busy thread triggers one analysis.
+    #[test]
+    fn touched_prospects_covers_both_directions_and_dedups() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+        let ada = seed_prospect(&conn, "https://li/ada", stages[0]);
+        let grace = seed_prospect(&conn, "https://li/grace", stages[1]);
+
+        let batch = [
+            out("https://li/ada", "o1", "hello"),
+            incoming("https://li/ada", "r1", "Thursday works"),
+            incoming("https://li/grace", "r2", "not now"),
+            out("https://li/nobody", "x", "dropped"),
+        ];
+        let outcome = store_batch(&conn, &batch).unwrap();
+        assert_eq!(outcome.touched_prospects, vec![ada, grace]);
+        assert_eq!(outcome.new_outgoing.len(), 1, "only our own send proposes snippets");
+
+        // A replay is not new evidence — nothing to re-analyze.
+        let replay = store_batch(&conn, &batch).unwrap();
+        assert!(replay.touched_prospects.is_empty(), "a replay triggers no analysis");
+    }
+
+    /// A blank-bodied capture carries no evidence, so it must not wake the
+    /// analyzer — matching the rule `new_outgoing` already applies.
+    #[test]
+    fn a_blank_message_does_not_touch_a_prospect() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+        seed_prospect(&conn, "https://li/ada", stages[0]);
+
+        let outcome = store_batch(&conn, &[incoming("https://li/ada", "r1", "   ")]).unwrap();
+        assert_eq!(outcome.stored, 1, "it is still stored (dedup identity matters)");
+        assert!(outcome.touched_prospects.is_empty());
+    }
+
+    #[test]
+    fn recent_for_prospect_returns_the_newest_window_oldest_first() {
+        let conn = setup();
+        let stages = pipeline_stages(&conn);
+        let id = seed_prospect(&conn, "https://li/ada", stages[0]);
+
+        for (i, dir) in [OUTGOING, INCOMING, OUTGOING, INCOMING].into_iter().enumerate() {
+            store(&conn, id, &format!("k{i}"), &format!("m{i}"), None, dir).unwrap();
+        }
+        // A blank body is skipped — it is dedup identity, not conversation.
+        store(&conn, id, "blank", "", None, OUTGOING).unwrap();
+
+        let all = recent_for_prospect(&conn, id, 10).unwrap();
+        let bodies: Vec<&str> = all.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["m0", "m1", "m2", "m3"], "oldest first, blanks dropped");
+        assert_eq!(
+            all.iter().map(|m| m.incoming).collect::<Vec<_>>(),
+            [false, true, false, true]
+        );
+
+        // The cap keeps the most RECENT messages — the decisive end of the
+        // thread — not the opening ones.
+        let windowed = recent_for_prospect(&conn, id, 2).unwrap();
+        let bodies: Vec<&str> = windowed.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["m2", "m3"]);
+
+        assert!(recent_for_prospect(&conn, 9999, 10).unwrap().is_empty());
     }
 
     #[test]

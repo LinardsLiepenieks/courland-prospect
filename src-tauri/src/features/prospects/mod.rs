@@ -5,6 +5,7 @@
 //! ingest server (`crate::ingest`), which calls `repository::upsert` directly.
 //! That's why `repository`'s `list`/`upsert` are `pub(crate)`.
 
+pub(crate) mod advance;
 pub mod commands;
 mod model;
 pub(crate) mod repository;

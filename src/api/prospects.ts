@@ -25,6 +25,19 @@ export interface Prospect {
    *  the Chrome extension captures: a reply at any stage sets it, and our answer
    *  clears it. Drives the "Awaiting reply" treatment on their card. */
   awaiting_reply: boolean;
+  /** When you last sent this prospect a message (SQLite `YYYY-MM-DD HH:MM:SS`,
+   *  UTC). Read-only: derived from captured messages alongside `messages_sent`.
+   *  `null` means you've never messaged them — `staleness.ts` ages those from
+   *  `created_at` instead, so a captured-but-never-contacted prospect still goes
+   *  stale rather than sitting fresh forever. */
+  last_outreach_at: string | null;
+  /** The stage the advance analyzer thinks this prospect has outgrown into,
+   *  pending your accept/dismiss. `null` when there's no open suggestion — the
+   *  resting state, since suggestions are never applied on their own. */
+  suggested_stage_id: number | null;
+  /** The analyzer's one-line justification, shown on the card so the suggestion
+   *  can be judged without reopening the thread. Empty when there's none. */
+  suggested_reason: string;
   note: string;
   created_at: string;
 }
@@ -60,6 +73,31 @@ export function setProspectCustomer(
   customerId: number | null,
 ): Promise<Prospect> {
   return invoke("set_prospect_customer", { id, customerId });
+}
+
+/** Take the analyzer's pending suggestion: move the prospect to the stage it
+ *  points at. Deliberately a command rather than a client-side
+ *  `setProspectStage(suggested_stage_id)` — the backend re-reads the suggestion
+ *  under the same lock it applies it with, so a suggestion superseded between
+ *  render and click can't move someone somewhere the app no longer believes in.
+ *  Returns the updated prospect (with the suggestion cleared). */
+export function acceptStageSuggestion(id: number): Promise<Prospect> {
+  return invoke("accept_stage_suggestion", { id });
+}
+
+/** Wave off the pending suggestion without moving anyone. Not remembered: the
+ *  next message in the thread is new evidence and may raise it again. */
+export function dismissStageSuggestion(id: number): Promise<Prospect> {
+  return invoke("dismiss_stage_suggestion", { id });
+}
+
+/** Re-run the advance check for one prospect now. The analyzer fires on its own
+ *  whenever a message lands, so this is for when nothing new will arrive to
+ *  trigger it — you moved someone by hand, or you just wrote a stage's goal and
+ *  want it applied to the threads already sitting there. Slow (it shells out to
+ *  Claude Code); a verdict of "not yet" returns the row unchanged. */
+export function recheckProspectStage(id: number): Promise<Prospect> {
+  return invoke("recheck_prospect_stage", { id });
 }
 
 /** Subscribe to backend "prospects changed" pushes — fired when the Chrome

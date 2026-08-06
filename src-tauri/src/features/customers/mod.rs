@@ -19,7 +19,10 @@
 //!   - `mod`        — declares the submodules and re-exports the public surface
 
 pub mod commands;
-mod model;
+// `pub(crate)` for the same reason as the stages slice: `repository::find`
+// returns a `Customer`, and the advance analyzer holds one in a named struct
+// field, so the type has to stay nameable crate-wide.
+pub(crate) mod model;
 // `pub(crate)` (not private) because the ingest HTTP server in `crate::ingest`
 // serves the customer list to the extension's dropdown and resolves a prospect's
 // customer when drafting.
