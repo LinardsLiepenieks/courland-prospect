@@ -7,6 +7,26 @@
 //! argument, it isn't bounded by the OS command-line length limit (Windows'
 //! `CreateProcessW` caps that at 32,767 chars, which a page-HTML heal prompt blows
 //! straight past).
+//!
+//! # Every prompt here is text-in, text-out — and is spawned with no tools
+//!
+//! Reusing the user's install means inheriting the user's *permissions*. A plain
+//! `claude -p` picks up their `~/.claude/settings.json` allowlist — which on a
+//! working developer machine routinely pre-approves `Bash`, `Write`, `Edit`,
+//! `WebFetch`, plus every configured MCP server. That is the correct setup for a
+//! coding session and the wrong one for this app.
+//!
+//! It matters because most of what gets rendered into these prompts is text the
+//! user did not write: LinkedIn messages from strangers, post bodies, scraped page
+//! HTML. The prompts fence that content and tell the model to treat it as data,
+//! and every one of them asks only for prose or a small JSON verdict back. So the
+//! tools are pure downside, and [`TOOL_DENY`] removes them.
+//!
+//! This became load-bearing when the advance analyzer landed
+//! (`features::prospects::advance`): it is the first path that feeds *inbound*
+//! stranger text to the CLI with no human in the loop at all — no click, no
+//! review, fired straight off a captured message. Before it, every path was
+//! user-initiated or composed only from the user's own outgoing text.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -36,6 +56,30 @@ fn limiter() -> &'static Semaphore {
 /// returns nothing, the UI shows the same actionable line.
 const GENERIC_ERROR: &str = "Couldn't reach Claude Code. Make sure it's installed and try again.";
 
+/// The tools no prompt from this app may use, passed as `--disallowedTools`.
+///
+/// Deny wins over allow in Claude Code's permission resolution, so this overrides
+/// whatever the user's own `settings.json` pre-approves — which is the point:
+/// their allowlist is scoped to their coding work, not to a background pass over
+/// a stranger's LinkedIn message.
+///
+/// The list is deliberately blunt rather than clever. It covers arbitrary
+/// execution (`Bash`), every filesystem write (`Write`, `Edit`, `NotebookEdit`),
+/// filesystem *reads* (`Read`, `Glob`, `Grep` — nothing here has any business
+/// looking at the disk, and reads are the exfiltration half of a leak), network
+/// egress (`WebFetch`, `WebSearch`), and sub-agent spawning (`Task`, which would
+/// otherwise be a hole straight through the rest of this list).
+///
+/// A tool added to Claude Code in future won't appear here, which is why
+/// [`STRICT_MCP`] does the structural half of the job: it cuts off every
+/// configured MCP server wholesale rather than naming them one by one.
+const TOOL_DENY: &str = "Bash Read Write Edit NotebookEdit Glob Grep WebFetch WebSearch Task";
+
+/// Ignore every MCP server the user has configured. Unlike [`TOOL_DENY`] this
+/// needs no enumeration and can't fall behind: a connector added tomorrow is
+/// excluded by default rather than by name.
+const STRICT_MCP: &str = "--strict-mcp-config";
+
 /// A generation that hit [`TIMEOUT`] is a different problem from a missing binary,
 /// and telling the user to check their install sends them the wrong way. The usual
 /// cause is an oversized prompt (a very large snippet library), so name that.
@@ -47,6 +91,31 @@ const TIMEOUT_ERROR: &str =
 /// and repeated hangs can't starve the blocking thread pool.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How many characters of a failing invocation's stderr to log. Enough for the CLI's
+/// one-line "unknown option" complaint, short enough that a runaway can't flood the log.
+const MAX_STDERR_LOG: usize = 400;
+
+/// How long to wait for a drain thread to hand over its output AFTER the child has exited.
+///
+/// [`TIMEOUT`] bounds waiting for the *process*; this bounds waiting for the *pipes*, which
+/// is not the same thing and used to be unbounded. A drain thread reports only once
+/// `read_to_end` returns, and that needs every write end of its pipe closed — so a `claude`
+/// invocation that leaves behind a detached descendant holding stdout or stderr (Node CLIs
+/// do: updaters, telemetry helpers) keeps the pipe open after the parent is gone, the
+/// blocking `recv()` never returns, and `run` never returns either.
+///
+/// That is worse than one hung call. The concurrency permit is held until [`run_capped`]
+/// returns, so a call parked here surrenders a permit for the life of the app; enough of
+/// them and every AI feature is dead — spinners that never resolve, background passes that
+/// silently skip, and no error reported anywhere, because nothing ever completes to report
+/// one. Short, because by the time this is consulted the process has already exited.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Ceiling on the `claude --version` availability probe. Much shorter than [`TIMEOUT`]:
+/// printing a version string is instant, so anything slower is wedged rather than busy,
+/// and the UI is waiting on this answer to decide whether to enable the AI features.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Whether the local Claude Code CLI can be reached. Runs `claude --version`
 /// (fast, side-effect-free) and reports whether it succeeded. The UI calls this
 /// to explain and disable the polish/draft features up front when Claude Code
@@ -54,14 +123,34 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// Blocking — call it off the UI thread (via `spawn_blocking`), like [`run`].
 pub fn is_available() -> bool {
-    Command::new(find_claude())
+    let Ok(mut child) = Command::new(find_claude())
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn()
+    else {
+        return false;
+    };
+    // Bounded, unlike a bare `status()`. This runs on a blocking thread that a Tauri
+    // command awaits, so a wedged `claude --version` would otherwise hang that command
+    // forever — `run` has a ceiling and the probe had none.
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!("ai: `claude --version` timed out");
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Run a prompt through Claude Code and return its trimmed text output.
@@ -74,9 +163,24 @@ pub fn run(prompt: &Prompt) -> Result<String, String> {
     let rendered = prompt.render();
     let mut child = Command::new(&claude)
         .arg("-p")
+        // Text in, text out, no tools — see the module docs. Both flags are
+        // passed on every invocation rather than per-prompt: there is no prompt
+        // in this app that needs a tool, so an opt-in would only be a chance to
+        // forget one.
+        .arg("--disallowedTools")
+        .arg(TOOL_DENY)
+        .arg(STRICT_MCP)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Piped, not null. The user-facing message stays generic, but the CLI writes the
+        // actual cause here and ONLY here — and the cause that matters is a rejected
+        // flag: this app passes `--disallowedTools` and `--strict-mcp-config` on every
+        // invocation, `is_available()` only probes `--version` so it never exercises
+        // them, and an unrecognised option exits non-zero with an empty stdout. Discarding
+        // stderr made that indistinguishable from a missing binary, so every AI feature
+        // failed with "make sure it's installed" about a binary that was installed and
+        // working, and the one line naming the real problem was thrown away.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             // Distinct diagnostic (finding: field failures are otherwise
@@ -106,6 +210,20 @@ pub fn run(prompt: &Prompt) -> Result<String, String> {
         let _ = tx.send(buf);
     });
 
+    // Drain stderr too, for the same deadlock reason — a chatty failure could otherwise
+    // fill its pipe and wedge the process we're waiting on.
+    // Only the first chunk is ever logged, so only the first chunk is read: `take` caps the
+    // buffer instead of holding a runaway stderr in memory to throw most of it away. It also
+    // means this thread finishes promptly on a chatty failure rather than reading to EOF.
+    // Generous multiple of the log budget so a multi-byte tail still has room.
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let (err_tx, err_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.take((MAX_STDERR_LOG * 8) as u64).read_to_end(&mut buf);
+        let _ = err_tx.send(buf);
+    });
+
     // Poll for exit until the deadline; kill on timeout. `run` already executes
     // on a blocking thread, so the short sleep here is fine.
     let deadline = Instant::now() + TIMEOUT;
@@ -129,11 +247,37 @@ pub fn run(prompt: &Prompt) -> Result<String, String> {
     };
 
     if !status.success() {
-        eprintln!("ai: `claude` exited with {status}");
+        // Log a bounded tail of stderr alongside the status. This is the line that says
+        // whether the CLI is missing, rejected one of our flags, or failed for its own
+        // reasons — the difference between "reinstall Claude Code" and "this build
+        // doesn't accept --strict-mcp-config". Bounded so a runaway stderr can't flood
+        // the log; the user still sees only the one friendly message.
+        let detail = err_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+        let detail = String::from_utf8_lossy(&detail);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            eprintln!("ai: `claude` exited with {status} (no stderr)");
+        } else {
+            let tail: String = detail.chars().take(MAX_STDERR_LOG).collect();
+            eprintln!("ai: `claude` exited with {status}: {tail}");
+        }
         return Err(GENERIC_ERROR.to_string());
     }
 
-    let bytes = rx.recv().unwrap_or_default();
+    // Bounded, not blocking — see `DRAIN_GRACE`. The child has exited by now, so the output
+    // is either already buffered or held open by something that outlived it; waiting forever
+    // on the latter parks this call's permit permanently. A drain that misses the grace
+    // period is reported as the one friendly error rather than as an empty success.
+    let bytes = match rx.recv_timeout(DRAIN_GRACE) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            eprintln!(
+                "ai: `claude` exited but its output never closed within {}s — abandoning the read",
+                DRAIN_GRACE.as_secs()
+            );
+            return Err(GENERIC_ERROR.to_string());
+        }
+    };
     let text = String::from_utf8_lossy(&bytes).trim().to_string();
     if text.is_empty() {
         return Err(GENERIC_ERROR.to_string());
