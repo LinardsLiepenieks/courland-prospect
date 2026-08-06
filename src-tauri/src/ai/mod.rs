@@ -10,9 +10,15 @@
 //!               the single string handed to the CLI.
 //!  - `client` — runs a `Prompt` through the local `claude` CLI (headless
 //!               `-p` mode), reusing the user's own Claude Code install/auth.
+//!  - `parse`  — the other end: locates the JSON in a reply before a feature
+//!               reads its fields. Shared because every machine-parsed prompt
+//!               faces the same preamble/fences problem.
 
 pub mod client;
 pub mod commands;
+// `pub(crate)` (not public): finding the JSON in a reply is infrastructure for the
+// features that parse one, not part of the AI module's outward surface.
+pub(crate) mod parse;
 pub mod prompt;
 
 pub use prompt::{
