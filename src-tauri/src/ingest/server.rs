@@ -42,11 +42,12 @@ use super::security::{self, TOKEN_HEADER};
 use super::{gate, Heartbeat, IngestConfig};
 use crate::ai::{
     self, comment_is_skip, BrokenSelector, CommentContext, DraftContext, DraftCustomer,
-    DraftMessage, DraftSnippet, Prompt,
+    DraftMessage, DraftSnippet, DraftStage, Prompt,
 };
 use crate::database::AppState;
 use crate::features::{
-    comments, customers, messages, product, profile, prospects, selectors, snippets, watchlist,
+    comments, customers, messages, product, profile, prospects, selectors, snippets, stages,
+    watchlist,
 };
 use crate::util::{MAX_NAME_LEN, MAX_TEXT_LEN};
 
@@ -74,7 +75,12 @@ struct ServerState {
 /// Emitted whenever the extension changes prospects (a fresh capture, or messages
 /// bumping a derived count) so an open desktop view can re-fetch and reflect it
 /// live instead of only on its next mount.
-const PROSPECTS_CHANGED: &str = "prospects://changed";
+///
+/// `pub(crate)` because the advance analyzer
+/// (`features::prospects::advance`) writes suggestions from a background task
+/// long after the ingest response has been sent, and has to nudge the board the
+/// same way. One event name, one meaning: "prospect rows changed underneath you".
+pub(crate) const PROSPECTS_CHANGED: &str = "prospects://changed";
 
 /// Bind and serve the ingest API. On a startup failure it drives the gate to
 /// `Error` (rather than returning silently) so the UI shows the *real* fault
@@ -345,10 +351,18 @@ struct DraftMsgIn {
 /// any thread — including people who aren't prospects yet. `prospect_name` is
 /// best-effort; `customer_id` is the profile to steer toward, and is optional —
 /// omitted (or naming a since-deleted profile) simply drafts without a goal.
-/// Drafting is stateless (no prospect lookup), so no `linkedin_url` is needed.
+///
+/// `linkedin_url` is the person's PROFILE url (`/in/<slug>/`), used for one
+/// lookup: which cycle stage this prospect sits in, so the reply can aim at that
+/// step's goal rather than the whole relationship's. Optional throughout —
+/// omitted, unknown, or naming a non-prospect all drop the stage block and draft
+/// exactly as before. Note this is the ONLY stateful thing the route reads about
+/// the person; the conversation still comes from the live scrape.
 ///
 /// `deny_unknown_fields` for the same reason as `NewProspect`: a stale build's
-/// `pitch_id` should be a visible error, not a silently unsteered draft.
+/// `pitch_id` should be a visible error, not a silently unsteered draft. Which
+/// is also why `linkedin_url` had to land here before the extension started
+/// sending it — an unknown field is a 422, not a degraded draft.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DraftRequest {
@@ -356,6 +370,8 @@ struct DraftRequest {
     prospect_name: String,
     #[serde(default)]
     customer_id: Option<i64>,
+    #[serde(default)]
+    linkedin_url: String,
     #[serde(default)]
     messages: Vec<DraftMsgIn>,
 }
@@ -370,9 +386,11 @@ struct DraftRequest {
 async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftRequest>) -> Response {
     let app = state.app.clone();
     let customer_id = body.customer_id;
+    let linkedin_url = body.linkedin_url.trim().to_string();
 
     // Bound untrusted browser input before it becomes a CLI argument.
     if body.prospect_name.chars().count() > MAX_NAME_LEN
+        || linkedin_url.chars().count() > MAX_TEXT_LEN
         || body.messages.iter().any(|m| m.body.chars().count() > MAX_TEXT_LEN)
     {
         return (StatusCode::BAD_REQUEST, "field too long").into_response();
@@ -397,11 +415,26 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         // closers), which is the order the model composes in; picking which of these
         // serve this customer's goal is the model's job, not a query's.
         let snippets = snippets::repository::list_approved(&conn).map_err(|e| e.to_string())?;
-        Ok::<_, String>((product, profile, customer, snippets))
+        // Where this thread sits in the cycle, when we can tell. Every step is
+        // allowed to come up empty — a blank url, a person who isn't a prospect,
+        // a prospect with no stage — and each simply drafts without the block,
+        // exactly as before this lookup existed. Never an error: a reply the user
+        // is waiting on must not fail because the board couldn't be consulted.
+        let stage = match prospects::repository::find_by_url(&conn, &linkedin_url) {
+            Ok(Some(p)) => p.stage_id.and_then(|id| {
+                stages::repository::find(&conn, id).ok().flatten()
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("draft: stage lookup failed, drafting without it: {e}");
+                None
+            }
+        };
+        Ok::<_, String>((product, profile, customer, snippets, stage))
     })
     .await;
 
-    let (product, profile, customer, snippets) = match gathered {
+    let (product, profile, customer, snippets, stage) = match gathered {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -414,7 +447,12 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         snippets
             .into_iter()
             .filter(|s| !s.content.trim().is_empty())
-            .map(|s| DraftSnippet { stage: s.category, name: s.name, content: s.content })
+            .map(|s| DraftSnippet {
+                stage: s.category,
+                topic: s.topic,
+                name: s.name,
+                content: s.content,
+            })
             .collect(),
     );
 
@@ -459,14 +497,54 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
             pain: &c.pain,
             goal: &c.goal,
         }),
+        // A stage with no goal steers nothing, so it's dropped here rather than
+        // rendered as an empty heading (the renderer guards this too; keeping the
+        // rule visible at the call site is cheap).
+        stage: stage
+            .as_ref()
+            .filter(|s| !s.goal.trim().is_empty())
+            .map(|s| DraftStage { name: &s.name, goal: &s.goal }),
         snippets: &draft_snippets,
         conversation: &conversation,
     };
 
-    match ai::client::run_capped(Prompt::draft_reply(&ctx)).await {
-        Ok(draft) => Json(serde_json::json!({ "draft": draft })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    // Enforce the no-literal-bracket rule in code, not just in the instruction.
+    //
+    // `DRAFT_INSTRUCTION` states that the reply must never contain a literal `[` or `]`,
+    // and nothing checked it. Worse, the instruction can talk itself into breaking the
+    // rule: its PLACEHOLDERS clause offers "reword the sentence" as the fallback for an
+    // unfillable blank, while a later clause insists snippets stay verbatim — and a model
+    // resolving that conflict toward verbatim emits the bracket. It only takes an approved
+    // snippet with a blank whose only source is the customer profile, plus a thread for
+    // someone who isn't a prospect yet (no profile, no stage), for that to be the live
+    // case. The draft then lands in the LinkedIn composer with `[their kind of team]` in
+    // it. The commenter already guards this exact thing via `sample_voice`; the drafter
+    // did not.
+    //
+    // One retry, then fail closed. Returning an error is honest — the extension shows it
+    // and leaves the composer untouched — whereas stripping the bracket would silently
+    // ship a sentence with a hole in it.
+    for attempt in 0..2 {
+        match ai::client::run_capped(Prompt::draft_reply(&ctx)).await {
+            Ok(draft) if !draft.contains(['[', ']']) => {
+                return Json(serde_json::json!({ "draft": draft })).into_response();
+            }
+            Ok(_) => {
+                eprintln!(
+                    "ingest: draft came back with a literal placeholder bracket (attempt {})",
+                    attempt + 1
+                );
+            }
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
     }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "The draft kept coming back with an unfilled [placeholder]. Check that the \
+         snippets it needs have a customer profile to fill them from."
+            .to_string(),
+    )
+        .into_response()
 }
 
 /// Serve the hand-curated watchlist — the LinkedIn profiles a comment run visits
@@ -606,14 +684,26 @@ fn fit_to_budget(snippets: Vec<DraftSnippet>) -> Vec<DraftSnippet> {
 const COMMENT_VOICE_CAP: usize = 12;
 
 /// Reduce the founder's approved snippet contents to a bounded voice/style corpus
-/// for the commenter: drop duplicate lines (case/space-insensitive, keeping the
-/// first), then, if still over the cap, take an evenly-spaced stride across the set
-/// so the sample spreads over the whole library instead of clustering on the newest
-/// additions.
+/// for the commenter: drop any snippet carrying a blank, drop duplicate lines
+/// (case/space-insensitive, keeping the first), then, if still over the cap, take an
+/// evenly-spaced stride across the set so the sample spreads over the whole library
+/// instead of clustering on the newest additions.
+///
+/// Blanks are ELIDED rather than the whole line dropped. A comment is published
+/// verbatim under the founder's name, and these samples sit in the prompt as prose to
+/// imitate, so a literal `[first name]` must never reach it — but dropping every
+/// blanked line threw the voice out with the bracket: a founder whose library is
+/// mostly blanked lines got two samples, or none at all, and their comments were then
+/// written with no style reference while the templating feature looked like it was
+/// working. `elide_blanks` keeps the sentence shape and word choice (which is all a
+/// style sample is for) and guarantees no bracket survives; a line that elides to
+/// nothing is then dropped as having no prose left.
 fn sample_voice(contents: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let kept: Vec<String> = contents
         .into_iter()
+        .map(|c| snippets::placeholder::elide_blanks(&c))
+        .filter(|c| !c.trim().is_empty())
         .filter(|c| seen.insert(c.trim().to_lowercase()))
         .collect();
     if kept.len() <= COMMENT_VOICE_CAP {
@@ -1002,20 +1092,15 @@ fn looks_like_selector(s: &str) -> bool {
 
 /// Extract the healed selector map from Claude's reply, keeping only requested
 /// keys whose value is a usable selector string, or a non-empty array of usable
-/// selector strings (see [`looks_like_selector`]). Tolerates a reply wrapped in
-/// prose or ```` ```json ```` fences by taking the outermost `{...}` object.
+/// selector strings (see [`looks_like_selector`]). Locating the `{...}` object past
+/// any prose or ```` ```json ```` fences is [`ai::parse::json_object`]'s job.
 fn parse_healed(
     raw: &str,
     requested: &HashSet<String>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
-    let slice = match (raw.find('{'), raw.rfind('}')) {
-        (Some(a), Some(b)) if b > a => &raw[a..=b],
-        _ => return out,
-    };
-    let obj = match serde_json::from_str::<serde_json::Value>(slice) {
-        Ok(serde_json::Value::Object(m)) => m,
-        _ => return out,
+    let Some(obj) = ai::parse::json_object(raw) else {
+        return out;
     };
     for (k, v) in obj {
         if !requested.contains(&k) {
@@ -1106,9 +1191,12 @@ async fn create_messages(
             if outcome.stored > 0 {
                 let _ = state.app.emit(PROSPECTS_CHANGED, ());
             }
-            // Analyze genuinely-new outgoing messages for reusable snippets, off the
-            // response path (fire-and-forget) so the extension's outbox clears now.
+            // Two background passes over what just landed, both fire-and-forget so
+            // the extension's outbox clears now rather than behind a CLI call:
+            // reusable snippets out of what WE said, and — over threads that moved
+            // in either direction — whether the current stage's goal is now met.
             snippets::proposals::spawn(state.app.clone(), outcome.new_outgoing);
+            prospects::advance::spawn(state.app.clone(), outcome.touched_prospects);
             Json(serde_json::json!({ "stored": outcome.stored, "skipped": outcome.skipped }))
                 .into_response()
         }
@@ -1125,6 +1213,7 @@ mod tests {
     fn snippet(name: &str, chars: usize) -> DraftSnippet {
         DraftSnippet {
             stage: "Opener".into(),
+            topic: "Workflow".into(),
             name: name.into(),
             content: "x".repeat(chars),
         }
