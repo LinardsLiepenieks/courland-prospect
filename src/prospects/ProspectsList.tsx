@@ -3,11 +3,14 @@ import { formatDate } from "../lib/date";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
 import {
+  AdvanceSuggestion,
+  AgePill,
   MessageCount,
   AwaitingReplyBadge,
   CustomerMenu,
   StageMenu,
 } from "./ProspectControls";
+import { stalenessOf } from "./staleness";
 import styles from "./ProspectsList.module.css";
 
 /** Flat list view: one row per prospect with its customer profile, stage,
@@ -19,9 +22,14 @@ export default function ProspectsList({
   customers,
   messagingStageId,
   busyIds,
+  checkingIds,
+  now,
   onOpen,
   onMove,
   onSetCustomer,
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onRecheck,
   onDelete,
 }: ProspectViewProps) {
   return (
@@ -30,8 +38,16 @@ export default function ProspectsList({
         const busy = busyIds.has(p.id);
         const effectiveStage = effectiveStageId(p, stages, messagingStageId);
         const inMessaging = messagingStageId != null && effectiveStage === messagingStageId;
+        const stage = stages.find((s) => s.id === effectiveStage);
+        const staleness = stalenessOf(p, stage, now);
+        const suggested = stages.find((s) => s.id === p.suggested_stage_id);
         return (
-          <li key={p.id} className={styles.row} data-awaiting-reply={p.awaiting_reply || undefined}>
+          <li
+            key={p.id}
+            className={styles.row}
+            data-awaiting-reply={p.awaiting_reply || undefined}
+            data-staleness={staleness.level === "fresh" ? undefined : staleness.level}
+          >
             <button
               type="button"
               className={styles.open}
@@ -46,8 +62,23 @@ export default function ProspectsList({
               </span>
             </button>
 
+            {suggested && (
+              // Between the name and the controls, spanning the row: the list is
+              // dense, so a suggestion has to break the line to be noticed at all.
+              <div className={styles.rowSuggestion}>
+                <AdvanceSuggestion
+                  stageName={suggested.name}
+                  reason={p.suggested_reason}
+                  busy={busy}
+                  onAccept={() => onAcceptSuggestion(p.id)}
+                  onDismiss={() => onDismissSuggestion(p.id)}
+                />
+              </div>
+            )}
+
             <div className={styles.aside}>
               {inMessaging && <MessageCount value={p.messages_sent} />}
+              <AgePill reading={staleness} />
               {p.awaiting_reply && <AwaitingReplyBadge />}
               <CustomerMenu
                 customers={customers}
@@ -59,6 +90,8 @@ export default function ProspectsList({
                 stages={stages}
                 currentStageId={effectiveStage}
                 onMove={(stageId) => onMove(p.id, stageId)}
+                onRecheck={() => onRecheck(p.id)}
+                checking={checkingIds.has(p.id)}
                 busy={busy}
               />
               <span className={styles.date}>{formatDate(p.created_at)}</span>

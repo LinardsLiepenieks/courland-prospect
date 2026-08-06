@@ -162,6 +162,228 @@
   flex-shrink: 0;
 }
 
+/* ── Goal + cadence disclosure ───────────────────────────── */
+/* The trigger. Behind a disclosure because the list's job is to show the SHAPE
+   of the funnel at a glance — four open textareas would bury that under detail
+   you set once and revisit rarely. The target icon fills in when a goal exists,
+   so which steps actually steer drafts is still readable while collapsed. */
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 4px 0 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+/* Press feedback, like every other pressable on this row (.removeBtn, .addBtn, .swatch).
+   The goal/cadence toggle was the one control that didn't acknowledge the click. */
+.disclosure:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.disclosure svg {
+  width: 15px;
+  height: 15px;
+}
+
+.disclosure .chevron,
+.disclosure > svg:last-child {
+  width: 13px;
+  height: 13px;
+  opacity: 0.8;
+}
+
+.targetIcon {
+  flex-shrink: 0;
+}
+
+/* An empty bullseye reads as "no goal set"; filling the pip marks the ones that
+   do steer. Subtler than a badge, and it needs no extra row space. */
+.disclosure:not([data-has-goal]) .targetPip {
+  fill: none;
+}
+
+.disclosure[data-has-goal] {
+  color: var(--accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .disclosure:hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+  }
+
+  .disclosure[data-has-goal]:hover {
+    color: var(--accent-hover);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+}
+
+.disclosure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The panel. `width: 100%` makes it wrap onto its own line under the row's
+   controls (the row is a wrapping flex line), and the left inset lines it up
+   with the name field rather than the reorder arrows. */
+.details {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 2px 0 6px 30px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  animation: enterUp 180ms var(--ease-out) both;
+}
+
+.detailField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.detailLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.detailHint {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+.goalInput {
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.goalInput:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.goalInput:disabled {
+  opacity: 0.6;
+}
+
+/* ── Cadence (the two day thresholds) ────────────────────── */
+.cadence {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.cadenceRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dayField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dayLabel {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* The unit sits inside the field's border so "5 days" reads as one value rather
+   than a number next to a stray word. */
+.dayControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 9px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  transition:
+    border-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+
+.dayControl:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* A dot in the threshold's own color ties each field to the card treatment it
+   controls — amber for the nudge, red for rotting. */
+.dayLabel::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 999px;
+  vertical-align: middle;
+  background: var(--stage-amber);
+}
+
+.dayField[data-tone="stale"] .dayLabel::before {
+  background: var(--stage-red);
+}
+
+.dayInput {
+  width: 34px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  /* Spinners in a 34px field are more target than value. */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.dayInput::-webkit-outer-spin-button,
+.dayInput::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.dayUnit {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
 /* ── Color swatch + palette popover ──────────────────────── */
 .swatchWrap {
   display: inline-flex;
@@ -281,10 +503,14 @@
 @media (prefers-reduced-motion: reduce) {
   .removeBtn:active:not(:disabled),
   .addBtn:active:not(:disabled),
-  .swatch:active:not(:disabled) {
+  .swatch:active:not(:disabled),
+  .disclosure:active:not(:disabled) {
     transform: none;
   }
   .paletteSwatch:hover {
     transform: none;
+  }
+  .details {
+    animation: none;
   }
 }

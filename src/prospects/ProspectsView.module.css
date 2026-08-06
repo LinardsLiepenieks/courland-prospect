@@ -44,8 +44,66 @@
   border-radius: 999px;
 }
 
+/* The total, shown beside the filtered count only when the two differ. Lighter
+   than the count itself — it's reassurance that the rest still exists, not a
+   number you're meant to read. */
+.countTotal {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
 .headSpacer {
   flex: 1;
+}
+
+/* ── Customer filter ─────────────────────────────────────── */
+/* Sits left of the view toggle and stays visually quieter than it: the toggle
+   changes how you look at the board, this changes what's on it, and only the
+   latter can leave you staring at a subset without realising. Hence the accent
+   treatment the moment it stops being "All". */
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  transition:
+    border-color 140ms var(--ease-out),
+    background-color 140ms var(--ease-out);
+}
+
+.filter[data-active] {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.filterLabel {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-faint);
+}
+
+.filter[data-active] .filterLabel {
+  color: color-mix(in srgb, var(--accent) 80%, var(--text));
+}
+
+.filterSelect {
+  max-width: 160px;
+  padding: 2px 4px;
+  font-size: 13px;
+  font-weight: 550;
+  font-family: inherit;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.filterSelect:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 /* ── View toggle (segmented) ─────────────────────────────── */
@@ -117,6 +175,34 @@
   font-size: 14px;
   color: var(--text-muted);
   line-height: 1.6;
+}
+
+/* Inline "way out" link inside an empty state (e.g. clearing a filter that
+   matched nobody). A link, not a button — it undoes a view choice, it doesn't
+   change any data. */
+.blankAction {
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Gated like the other hovers in this change: ungated, tapping this on a touch device
+   leaves it stuck in the hover colour, so the link reads as permanently active. */
+@media (hover: hover) and (pointer: fine) {
+  .blankAction:hover {
+    color: var(--accent-hover);
+  }
+}
+
+.blankAction:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 4px;
 }
 
 .blankBody strong {

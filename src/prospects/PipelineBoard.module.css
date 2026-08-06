@@ -93,8 +93,29 @@
   transition:
     box-shadow 160ms var(--ease-out),
     background-color 200ms var(--ease-out),
+    border-color 200ms var(--ease-out),
     opacity 160ms var(--ease-out),
     transform 120ms var(--ease-out);
+}
+
+/* Staleness — days since YOU last wrote to them, graded by the stage's own
+ * thresholds. This is the card's THIRD channel and it deliberately takes the
+ * one edge the other two don't: the stage owns the left border, engagement owns
+ * the background wash, so rot tints the remaining three sides.
+ *
+ * Border-only, and quiet: the age pill in the foot carries the actual number,
+ * and a board where half the cards are washed red stops meaning anything. The
+ * left border is re-declared after each so the stage color always wins it back
+ * (the shorthand above sets all four, and `border-color` here would otherwise
+ * overwrite the stage edge too). */
+.card[data-staleness="warn"] {
+  border-color: color-mix(in srgb, var(--stage-amber) 45%, var(--border));
+  border-left-color: var(--stage-accent, var(--border));
+}
+
+.card[data-staleness="stale"] {
+  border-color: color-mix(in srgb, var(--stage-red) 60%, var(--border));
+  border-left-color: var(--stage-accent, var(--border));
 }
 
 /* Awaiting reply: a soft green wash signalling the prospect replied and awaits

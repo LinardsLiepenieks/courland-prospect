@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { STAGE_COLORS, type StageColor, type StageKind } from "../api/stages";
+import {
+  MAX_STALENESS_DAYS,
+  MIN_STALENESS_DAYS,
+  STAGE_COLORS,
+  type StageColor,
+  type StageKind,
+} from "../api/stages";
 import { Popover } from "../components/Popover";
 import { stageAccentStyle } from "../lib/stageColor";
 import styles from "./StageEditor.module.css";
@@ -13,6 +19,13 @@ export interface DraftStage {
   name: string;
   kind: StageKind;
   color: StageColor;
+  /** What this step is for — the exit condition the advance analyzer tests each
+   *  new message against, and the near target a draft aims at. Empty opts the
+   *  stage out of both. */
+  goal: string;
+  /** Days of silence before a card here is nudged, then flagged as rotting. */
+  warnDays: number;
+  staleDays: number;
 }
 
 /** What changed, so a persisted parent (Settings) can fire the matching API call
@@ -22,6 +35,8 @@ export type StageChange =
   | { type: "remove"; key: string }
   | { type: "rename"; key: string; name: string }
   | { type: "color"; key: string; color: StageColor }
+  | { type: "goal"; key: string; goal: string }
+  | { type: "thresholds"; key: string; warnDays: number; staleDays: number }
   | { type: "reorder" };
 
 let keyCounter = 0;
@@ -67,6 +82,18 @@ export default function StageEditor({
     onChange(next, { type: "color", key, color });
   }
 
+  function setGoal(key: string, goal: string) {
+    const next = stages.map((s) => (s.key === key ? { ...s, goal } : s));
+    onChange(next, { type: "goal", key, goal });
+  }
+
+  function setThresholds(key: string, warnDays: number, staleDays: number) {
+    const next = stages.map((s) =>
+      s.key === key ? { ...s, warnDays, staleDays } : s,
+    );
+    onChange(next, { type: "thresholds", key, warnDays, staleDays });
+  }
+
   // Swap a stage with its neighbour. The messaging stage (index 0) is pinned, so
   // moves never cross it (guarded by disabling the buttons at the edges).
   function move(index: number, dir: -1 | 1) {
@@ -84,7 +111,17 @@ export default function StageEditor({
     onChange(
       [
         ...stages,
-        { key: newStageKey(), name: "New stage", kind: "standard", color },
+        {
+          key: newStageKey(),
+          name: "New stage",
+          kind: "standard",
+          color,
+          // Matches the backend's append defaults, so the optimistic row and the
+          // one that comes back from the server look identical.
+          goal: "",
+          warnDays: 3,
+          staleDays: 7,
+        },
       ],
       { type: "add" },
     );
@@ -106,6 +143,8 @@ export default function StageEditor({
             disabled={disabled}
             onRename={(name) => rename(stage.key, name)}
             onSetColor={(color) => setColor(stage.key, color)}
+            onSetGoal={(goal) => setGoal(stage.key, goal)}
+            onSetThresholds={(warn, stale) => setThresholds(stage.key, warn, stale)}
             onRemove={() => remove(stage.key)}
             onMoveUp={() => move(index, -1)}
             onMoveDown={() => move(index, 1)}
@@ -133,6 +172,8 @@ function StageRow({
   disabled,
   onRename,
   onSetColor,
+  onSetGoal,
+  onSetThresholds,
   onRemove,
   onMoveUp,
   onMoveDown,
@@ -144,6 +185,8 @@ function StageRow({
   disabled: boolean;
   onRename: (name: string) => void;
   onSetColor: (color: StageColor) => void;
+  onSetGoal: (goal: string) => void;
+  onSetThresholds: (warnDays: number, staleDays: number) => void;
   onRemove: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -151,6 +194,10 @@ function StageRow({
   // Local editing buffer so we commit a rename once (on blur / Enter), not per
   // keystroke — the parent may persist each committed change.
   const [value, setValue] = useState(stage.name);
+  // The goal + cadence live behind a disclosure. The list's job is to show the
+  // shape of the funnel at a glance; four always-open textareas would bury that
+  // under detail you set once and revisit rarely.
+  const [open, setOpen] = useState(false);
 
   // Follow the committed name whenever the parent's copy changes underneath us.
   // Rows are keyed by a stable id, so this component survives a rejected save:
@@ -171,7 +218,7 @@ function StageRow({
   }
 
   return (
-    <li className={styles.row} data-messaging={first || undefined}>
+    <li className={styles.row} data-messaging={first || undefined} data-open={open || undefined}>
       <div className={styles.reorder}>
         <button
           type="button"
@@ -217,6 +264,21 @@ function StageRow({
 
       <ColorSwatch color={stage.color} disabled={disabled} onPick={onSetColor} />
 
+      <button
+        type="button"
+        className={styles.disclosure}
+        // A filled dot marks a stage that already has a goal, so you can see
+        // which steps steer drafts (and auto-advance) without opening each one.
+        data-has-goal={stage.goal.trim() !== "" || undefined}
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-label={`${open ? "Hide" : "Show"} goal and cadence for ${stage.name}`}
+        title="Goal and cadence"
+      >
+        <TargetIcon />
+        <ChevronIcon dir={open ? "up" : "down"} />
+      </button>
+
       {first ? (
         // The messaging stage can't be removed; reserve the slot so rows align.
         <span className={styles.removeSpacer} aria-hidden="true" />
@@ -232,7 +294,195 @@ function StageRow({
           <CloseIcon />
         </button>
       )}
+
+      {open && (
+        <StageDetails
+          stage={stage}
+          disabled={disabled}
+          onSetGoal={onSetGoal}
+          onSetThresholds={onSetThresholds}
+        />
+      )}
     </li>
+  );
+}
+
+/**
+ * The expanded half of a stage row: what this step is for, and how long someone
+ * may sit in it untouched.
+ *
+ * Both commit on blur rather than per keystroke, matching the name field above —
+ * the parent persists every committed change, and a write per character would
+ * be a write per character.
+ */
+function StageDetails({
+  stage,
+  disabled,
+  onSetGoal,
+  onSetThresholds,
+}: {
+  stage: DraftStage;
+  disabled: boolean;
+  onSetGoal: (goal: string) => void;
+  onSetThresholds: (warnDays: number, staleDays: number) => void;
+}) {
+  const [goal, setGoal] = useState(stage.goal);
+
+  // Follow the committed value when the parent's copy changes underneath us
+  // (a reload, or a rejected save reverting) — same reasoning as the name field.
+  useEffect(() => {
+    setGoal(stage.goal);
+  }, [stage.goal]);
+
+  function commitGoal() {
+    const trimmed = goal.trim();
+    if (trimmed !== stage.goal) onSetGoal(trimmed);
+    else setGoal(stage.goal); // normalize away whitespace-only edits
+  }
+
+  return (
+    <div className={styles.details}>
+      <label className={styles.detailField}>
+        <span className={styles.detailLabel}>Goal of this step</span>
+        <textarea
+          className={styles.goalInput}
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          onBlur={commitGoal}
+          onKeyDown={(e) => {
+            // Escape reverts; Enter is a newline here (unlike the name field) —
+            // a goal is a sentence, and it may want two.
+            if (e.key === "Escape") {
+              setGoal(stage.goal);
+              e.currentTarget.blur();
+            }
+          }}
+          rows={2}
+          disabled={disabled}
+          placeholder="What has to be true before they move on? e.g. “They've agreed to a call and a time is set.”"
+        />
+        <span className={styles.detailHint}>
+          Drafts for people here aim at this, and after each new message Claude
+          checks whether it's been met. Leave it empty to turn both off.
+        </span>
+      </label>
+
+      <fieldset className={styles.cadence} disabled={disabled}>
+        <legend className={styles.detailLabel}>Cadence</legend>
+        <div className={styles.cadenceRow}>
+          <DayInput
+            label="Nudge after"
+            value={stage.warnDays}
+            tone="warn"
+            // Each field's own range leaves room for its partner, so the pair the
+            // backend receives is always valid: warn stops one short of the
+            // ceiling, stale starts one above the floor.
+            min={MIN_STALENESS_DAYS}
+            max={MAX_STALENESS_DAYS - 1}
+            // The backend rejects warn >= stale. Rather than surface that as an
+            // error, carry the other value along so the pair stays valid: pushing
+            // the nudge past the stale mark pushes the stale mark with it.
+            onCommit={(warn) =>
+              onSetThresholds(warn, Math.max(stage.staleDays, warn + 1))
+            }
+          />
+          <DayInput
+            label="Stale after"
+            value={stage.staleDays}
+            tone="stale"
+            min={MIN_STALENESS_DAYS + 1}
+            max={MAX_STALENESS_DAYS}
+            onCommit={(stale) =>
+              onSetThresholds(Math.min(stage.warnDays, stale - 1), stale)
+            }
+          />
+        </div>
+        <span className={styles.detailHint}>
+          Days without a message from you before a card here turns amber, then
+          red.
+        </span>
+      </fieldset>
+    </div>
+  );
+}
+
+/** A small number field for one staleness threshold, clamped to `[min, max]` and
+ *  committed on blur.
+ *
+ *  Clamping here rather than in the caller matters: the displayed text is
+ *  corrected in the same tick as the write, so the field never shows a number
+ *  that isn't what got saved. (The pair-keeping in `StageDetails` then only has
+ *  to worry about ordering, never about range.) */
+function DayInput({
+  label,
+  value,
+  tone,
+  min,
+  max,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  tone: "warn" | "stale";
+  min: number;
+  max: number;
+  onCommit: (days: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  function commit() {
+    const parsed = Number.parseInt(text, 10);
+    if (Number.isNaN(parsed)) {
+      setText(String(value)); // reject junk; revert to the last good number
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, parsed));
+    setText(String(clamped));
+    if (clamped !== value) onCommit(clamped);
+  }
+
+  return (
+    <label className={styles.dayField} data-tone={tone}>
+      <span className={styles.dayLabel}>{label}</span>
+      <span className={styles.dayControl}>
+        <input
+          className={styles.dayInput}
+          type="number"
+          inputMode="numeric"
+          min={min}
+          max={max}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              e.currentTarget.blur();
+            }
+            if (e.key === "Escape") {
+              setText(String(value));
+              e.currentTarget.blur();
+            }
+          }}
+        />
+        <span className={styles.dayUnit}>days</span>
+      </span>
+    </label>
+  );
+}
+
+/** A target/bullseye — the mark for a stage's goal. */
+function TargetIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className={styles.targetIcon}>
+      <circle cx="12" cy="12" r="8.2" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="12" cy="12" r="3.4" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="12" cy="12" r="1.3" fill="currentColor" className={styles.targetPip} />
+    </svg>
   );
 }
 

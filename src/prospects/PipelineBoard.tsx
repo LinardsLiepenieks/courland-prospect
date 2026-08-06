@@ -7,11 +7,14 @@ import { stageAccentStyle } from "../lib/stageColor";
 import DeleteControl from "./DeleteControl";
 import { effectiveStageId } from "./effectiveStage";
 import {
+  AdvanceSuggestion,
+  AgePill,
   MessageCount,
   AwaitingReplyBadge,
   CustomerMenu,
   StageMenu,
 } from "./ProspectControls";
+import { stalenessOf, type StalenessReading } from "./staleness";
 import styles from "./PipelineBoard.module.css";
 
 /** Kanban board: one column per stage, cards dragged between columns to move a
@@ -24,9 +27,14 @@ export default function PipelineBoard({
   customers,
   messagingStageId,
   busyIds,
+  checkingIds,
+  now,
   onOpen,
   onMove,
   onSetCustomer,
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onRecheck,
   onDelete,
 }: ProspectViewProps) {
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -96,13 +104,21 @@ export default function PipelineBoard({
                   customers={customers}
                   currentStageId={columnOf(p)}
                   showCount={isMessaging}
+                  // Graded against the column they're actually IN, which is the
+                  // one whose tolerance applies — not their stored `stage_id`,
+                  // which can dangle mid-refresh.
+                  staleness={stalenessOf(p, stage, now)}
                   busy={busyIds.has(p.id)}
+                  checking={checkingIds.has(p.id)}
                   dragging={draggingId === p.id}
                   onDragStart={() => setDraggingId(p.id)}
                   onDragEnd={endDrag}
                   onOpen={onOpen}
                   onMove={onMove}
                   onSetCustomer={onSetCustomer}
+                  onAcceptSuggestion={onAcceptSuggestion}
+                  onDismissSuggestion={onDismissSuggestion}
+                  onRecheck={onRecheck}
                   onDelete={onDelete}
                 />
               ))}
@@ -125,13 +141,18 @@ function ProspectCard({
   customers,
   currentStageId,
   showCount,
+  staleness,
   busy,
+  checking,
   dragging,
   onDragStart,
   onDragEnd,
   onOpen,
   onMove,
   onSetCustomer,
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onRecheck,
   onDelete,
 }: {
   prospect: Prospect;
@@ -139,20 +160,31 @@ function ProspectCard({
   customers: Customer[];
   currentStageId: number | null;
   showCount: boolean;
+  staleness: StalenessReading;
   busy: boolean;
+  checking: boolean;
   dragging: boolean;
   onDragStart: () => void;
   onDragEnd: () => void;
   onOpen: (url: string) => void;
   onMove: (id: number, stageId: number) => void;
   onSetCustomer: (id: number, customerId: number | null) => void;
+  onAcceptSuggestion: (id: number) => void;
+  onDismissSuggestion: (id: number) => void;
+  onRecheck: (id: number) => void;
   onDelete: (id: number) => Promise<void>;
 }) {
+  // A suggestion whose target stage has vanished (deleted while the board was
+  // open) renders nothing — the backend nulls the reference, but a render can
+  // land in between.
+  const suggested = stages.find((s) => s.id === p.suggested_stage_id);
+
   return (
     <article
       className={styles.card}
       data-dragging={dragging || undefined}
       data-awaiting-reply={p.awaiting_reply || undefined}
+      data-staleness={staleness.level === "fresh" ? undefined : staleness.level}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = "move";
@@ -173,10 +205,22 @@ function ProspectCard({
         <DeleteControl name={p.name} onDelete={() => onDelete(p.id)} />
       </div>
       {p.headline && <span className={styles.cardHeadline}>{p.headline}</span>}
+
+      {suggested && (
+        <AdvanceSuggestion
+          stageName={suggested.name}
+          reason={p.suggested_reason}
+          busy={busy}
+          onAccept={() => onAcceptSuggestion(p.id)}
+          onDismiss={() => onDismissSuggestion(p.id)}
+        />
+      )}
+
       <div className={styles.cardFoot}>
-        {(showCount || p.awaiting_reply) && (
+        {(showCount || p.awaiting_reply || staleness.level !== "fresh") && (
           <div className={styles.cardTags}>
             {showCount && <MessageCount value={p.messages_sent} />}
+            <AgePill reading={staleness} />
             {p.awaiting_reply && <AwaitingReplyBadge />}
           </div>
         )}
@@ -194,6 +238,8 @@ function ProspectCard({
             stages={stages}
             currentStageId={currentStageId}
             onMove={(stageId) => onMove(p.id, stageId)}
+            onRecheck={() => onRecheck(p.id)}
+            checking={checking}
             busy={busy}
           />
         </div>

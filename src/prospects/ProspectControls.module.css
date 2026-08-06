@@ -46,6 +46,178 @@
   opacity: 0.9;
 }
 
+/* ── Age pill (read-only staleness) ──────────────────────── */
+/* Only rendered past a stage's warn threshold, so its mere presence is the
+   signal; the color is the severity. Amber and red are the palette's own stage
+   tokens, so they re-theme in dark mode alongside everything else. */
+.age {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: 8px;
+  /* Not interactive — signal that plainly. */
+  cursor: default;
+  white-space: nowrap;
+  transition:
+    color 200ms var(--ease-out),
+    background-color 200ms var(--ease-out);
+}
+
+.age[data-level="warn"] {
+  color: var(--stage-amber);
+  background: color-mix(in srgb, var(--stage-amber) 14%, transparent);
+}
+
+.age[data-level="stale"] {
+  color: var(--stage-red);
+  background: color-mix(in srgb, var(--stage-red) 15%, transparent);
+}
+
+.age svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.9;
+}
+
+/* ── Advance suggestion ──────────────────────────────────── */
+/* An inset panel rather than another pill in the foot: it carries two actions
+   and a sentence, and it is the one thing on the card asking for a decision. */
+.suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 8px;
+  /* A suggestion appears when the board live-refreshes after a captured message
+     — occasional and unprompted, so it earns an entrance that explains where it
+     came from. `enterUp` is the app's shared fade-up. */
+  animation: enterUp 220ms var(--ease-out) both;
+}
+
+.suggestionHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sparkIcon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.suggestionTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestionTitle strong {
+  font-weight: 650;
+  color: var(--text);
+}
+
+.suggestionActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* Accept and dismiss are the same size and weight on purpose. The verdict is a
+   guess about a scraped conversation; making "yes" the loud one would train the
+   eye to take it without reading the reason underneath. */
+.suggestionAccept,
+.suggestionDismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    color 120ms var(--ease-out),
+    background-color 120ms var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+.suggestionAccept svg,
+.suggestionDismiss svg {
+  width: 13px;
+  height: 13px;
+}
+
+.suggestionAccept {
+  color: var(--stage-green);
+}
+
+.suggestionDismiss {
+  color: var(--text-faint);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .suggestionAccept:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--stage-green) 16%, transparent);
+  }
+
+  .suggestionDismiss:hover:not(:disabled) {
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+  }
+}
+
+.suggestionAccept:active:not(:disabled),
+.suggestionDismiss:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.suggestionAccept:disabled,
+.suggestionDismiss:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.suggestionAccept:focus-visible,
+.suggestionDismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The model's justification — the reason the chip is worth reading at all. */
+.suggestionReason {
+  margin: 0;
+  padding-left: 19px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .suggestion {
+    animation: none;
+  }
+
+  .suggestionAccept:active:not(:disabled),
+  .suggestionDismiss:active:not(:disabled) {
+    transform: none;
+  }
+}
+
 /* ── Stage menu ──────────────────────────────────────────── */
 .stageMenu {
   display: inline-flex;
@@ -76,6 +248,32 @@
   flex-shrink: 0;
   border-radius: 999px;
   background: var(--pill);
+}
+
+/* A re-check shells out to Claude Code and can run for several seconds, so the
+   dot breathes rather than the pill just going inert. Slow and shallow — this
+   is a "still working" sign, not something to watch. */
+.stagePillDot[data-checking] {
+  /* The project's token, not the bare keyword — the built-in curve is weaker, so this dot
+     was breathing on a different rhythm from everything else in the app. */
+  animation: stagePulse 1400ms var(--ease-in-out) infinite;
+}
+
+@keyframes stagePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stagePillDot[data-checking] {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 
 .stagePillName {

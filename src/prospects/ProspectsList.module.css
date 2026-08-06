@@ -7,8 +7,14 @@
   gap: 2px;
 }
 
+/* Two columns (name | controls) with an optional full-width second row for an
+   advance suggestion. Grid rather than flex-wrap so the suggestion can span
+   underneath both columns while the name and controls stay on one line — and
+   because implicit rows are created on demand, a row with no suggestion has no
+   second track and no stray row-gap. */
 .row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 10px;
   border-radius: 10px;
@@ -37,9 +43,38 @@
   background: color-mix(in srgb, var(--stage-green) 13%, transparent);
 }
 
+/* Staleness — days since YOU last wrote to them, against the stage's own
+ * thresholds. A left edge rather than a wash, because the background is already
+ * spoken for by the awaiting-reply state and the two must be readable together:
+ * a prospect who replied a week ago and never got an answer is precisely the
+ * case worth catching, and it should show green AND red at once.
+ * After the awaiting-reply rules so the edge survives on those rows too. */
+.row[data-staleness="warn"],
+.row[data-staleness="stale"] {
+  box-shadow: inset 3px 0 0 var(--staleness-edge);
+}
+
+.row[data-staleness="warn"] {
+  --staleness-edge: color-mix(in srgb, var(--stage-amber) 70%, transparent);
+}
+
+.row[data-staleness="stale"] {
+  --staleness-edge: var(--stage-red);
+}
+
+/* The suggestion's own row, spanning both columns. Explicitly placed (rather
+   than auto-flowed) so it lands below the name and controls despite sitting
+   between them in the DOM — where it belongs for reading order. */
+.rowSuggestion {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  padding: 0 2px 10px 12px;
+}
+
 /* Name/headline — the click target that opens LinkedIn. */
 .open {
-  flex: 1;
+  grid-row: 1;
+  grid-column: 1;
   min-width: 0;
   padding: 12px;
   text-align: left;
@@ -81,6 +116,8 @@
 }
 
 .aside {
+  grid-row: 1;
+  grid-column: 2;
   display: flex;
   align-items: center;
   gap: 8px;
