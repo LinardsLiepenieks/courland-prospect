@@ -373,7 +373,16 @@ async function generateAndQueue(
   const customerId = await resolveCustomerForThread(profileUrl, fallbackCustomerId);
   const res = await send<DraftResult>({
     type: "draftReply",
-    payload: { prospect_name: name, customer_id: customerId, messages },
+    payload: {
+      prospect_name: name,
+      customer_id: customerId,
+      // The PROFILE url, same as the customer lookup above — the app keys
+      // prospects by it and reads their cycle stage from it, so the reply aims
+      // at the goal of the step they're actually on. The thread url would match
+      // nobody and silently cost every draft its stage.
+      linkedin_url: profileUrl,
+      messages,
+    },
   });
   if (!res.ok) return "failed";
   // Nothing configured to draft from. The app answers 200 with an ALL-CAPS

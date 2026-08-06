@@ -86,10 +86,17 @@ export interface DraftMessageInput {
 /** What the content script sends the SW to draft one reply. The conversation is
  *  scraped live from the open thread; `customer_id` is the profile to steer the
  *  reply toward, and may be null — an unmatched prospect still gets a draft, just
- *  one composed from the product and snippets with no goal to aim at. */
+ *  one composed from the product and snippets with no goal to aim at.
+ *
+ *  `linkedin_url` is the person's PROFILE url (`/in/<slug>/`, canonical form).
+ *  The app uses it for exactly one lookup: which cycle stage this prospect sits
+ *  in, so the reply can aim at that step's goal rather than the whole
+ *  relationship's. Send "" for a thread whose person couldn't be resolved — the
+ *  app drops the stage block and drafts as before. */
 export interface DraftReplyPayload {
   prospect_name: string;
   customer_id: number | null;
+  linkedin_url: string;
   messages: DraftMessageInput[];
 }
 
