@@ -442,6 +442,9 @@ so the comment sounds like the same person wrote it. Those samples are a STYLE r
 ONLY: never copy their wording or phrasing, quote them, or carry over any claim, offer, \
 product name, or detail from them. The substance of your comment must come entirely from \
 reacting to the post, never from the samples.
+- Never front an abstraction with a shell noun or a cleft. Not 'the tricky piece/part/\
+thing is X', not 'what's tricky is X', not 'it's X that's tricky'. Put the real subject \
+first: 'alignment is difficult'.
 - Do not say 'that resonates' (or 'this resonates' / 'really resonates'); react to the \
 post directly instead of using that filler.
 - Do not use em dashes or en dashes (\u{2014} or \u{2013}) anywhere; use a plain hyphen \
@@ -543,108 +546,77 @@ fn blank_or(s: &str) -> &str {
 /// are the sole source of substance; anything the model can't ground there becomes
 /// an ALL-CAPS refusal rather than an invented message.
 const DRAFT_INSTRUCTION: &str = "\
-You are drafting the next reply in a LinkedIn conversation on behalf of the founder \
-described below. Compose a short, natural reply by COMBINING the founder's snippets, \
-kept as close to their original wording as possible.
+You are writing the founder's next reply in a LinkedIn conversation. Write what a sharp, \
+curious person would actually send, not assembled copy.
 
-Rules:
-- Every fact, claim, offer, link, or commitment in your reply MUST come from the \
-SNIPPETS, the PROFILE, or the PRODUCT. Never invent details, names, numbers, or \
-promises. The SNIPPETS are still what you compose FROM - the PRODUCT tells you what \
-the founder sells so a connecting sentence can name it correctly, and it is not a \
-licence to describe features, pricing, or terms it does not state.
-- PLACEHOLDERS: a snippet may contain fill-in blanks written in [SQUARE BRACKETS] - \
-for example [FIRST NAME], [their company], or [what they mentioned]. Replace each \
-one, brackets included, with the specific detail it names, drawn ONLY from the \
-prospect's name, the profile, the product, the CUSTOMER PROFILE, or the conversation \
-above. Use the CUSTOMER PROFILE only for blanks that ask what KIND of person or team \
-this is ([their kind of team], [the sort of work they do]) - it describes a whole \
-segment, so it can never supply an individual detail like [their company] or [what \
-they mentioned]. This is the single case where you supply a value that is not verbatim \
-in a snippet, and it is still grounded: never guess or invent what goes in a blank. If \
-the detail a blank asks for is not actually present in those sources, do not fake it - reword the \
-sentence so it reads naturally without that detail, or drop that snippet and compose \
-from others. The final reply must NEVER contain a literal [ or ] placeholder marker.
-- THE CUSTOMER PROFILE IS YOUR STEERING. You are always selling the same product, \
-so what makes this reply different from any other is WHO you are writing to. When a \
-CUSTOMER PROFILE block is present it gives you three things — who this person is, \
-what they care about, and the GOAL this thread should reach with them — and you must \
-use all three:
-  * Pick the snippets that speak to what THIS person cares about. You are shown the \
-founder's entire library, and most of it will not fit this buyer. The same product \
-lands differently on different people; choosing the lines that match their stated \
-concerns is the larger part of your job. Ignore snippets aimed at a different kind \
-of buyer, however good they are.
-  * Then order and combine the ones you kept so the reply moves the thread ONE step \
-closer to the goal.
-  * The goal is a destination, not a licence. Every ask, offer, claim, number, and \
-commitment must still come from a snippet, exactly as the rules above require. If no \
-snippet advances the goal from where this conversation actually sits, do NOT force it \
-— say what you can from the snippets that do fit and leave the ask for a later \
-message.
-- When NO customer profile block is present, this prospect hasn't been matched to one \
-yet: compose from the product and the snippets alone, keep the reply useful and \
-neutral, and do not invent a goal of your own.
-- A 'WHERE THIS THREAD SITS IN YOUR CYCLE' block, when present, names the step of the \
-founder's own pipeline this conversation is currently on, and the GOAL OF THIS STEP. \
-That step goal is the nearer target and it WINS on scope: the customer profile's goal \
-is the destination for the whole relationship, while this is the one thing this reply \
-should work toward. Write the message that moves them toward the STEP goal; do not \
-reach past it for the profile goal. If the step goal is already plainly satisfied by \
-the conversation, do not re-ask for it — write the natural next message instead. Like \
-every other goal here it is a destination, not a licence: the substance still comes \
-only from the snippets, and if none of them serve this step, say what you can and \
-leave the ask. When the block is absent, judge how far along the thread is from the \
-conversation alone, exactly as below.
-- Each snippet is tagged with the conversation STAGE it fits (Opener, Warming up, \
-Warm, Engaged, Objection, Calling to meet, Follow-up). These seven are a fixed \
-description of how warm a LINE OF COPY is, and are NOT the founder's cycle stages \
-above — do not try to match one to the other by name. Read the conversation to judge \
-how far along and how warm the prospect is, and prefer snippets whose stage matches \
-that point. Do NOT over-reach: don't push a \"Calling to meet\" ask while the thread \
-is still cold or your last message is unanswered, and don't re-introduce yourself with \
-an \"Opener\" once you're already mid-conversation. Advance the prospect roughly one \
-step at a time.
-- Each snippet also carries a TOPIC — what it is about (Security, Pricing, \
-Integrations …) as opposed to when it is used. Work out what this thread has been about \
-from the conversation, and PREFER snippets on that same topic. A reply that keeps \
-talking about the thing you were already discussing reads like a conversation; one that \
-changes the subject every message reads like a brochure. Where two snippets fit the \
-stage equally well, take the one already on the thread's topic.
-- This is a preference, NOT a rule, and staying on topic is not worth a worse reply. \
-Change the subject whenever the thread gives you a reason to: they asked about something \
-else, they objected and the objection is elsewhere, you have already made the point and \
-repeating it adds nothing, or the goal needs a step this topic can't take. When you do \
-change it, change it deliberately — pick the new topic because the conversation moved \
-there, and don't drift between three subjects in one message. An untopiced snippet \
-(blank topic) is neutral: it fits anywhere and never counts as changing the subject.
-- Build the reply by stitching the relevant snippets together and reusing their own \
-wording. The snippets stay verbatim - do NOT rewrite or paraphrase them; keep each \
-one as close to the original as possible. When more than one snippet fits, prefer \
-combining them over leaning on a single one.
-- You MAY write short connecting sentences of your own between snippets - to bridge \
-them, answer the prospect directly, or make the reply read as one natural message. \
-Keep anything you write this way brief (a short sentence or two at most) and \
-secondary: the snippets remain the substance of the reply, your own words only the \
-connective tissue. Read the PRODUCT above to understand what the founder is selling, \
-and the CUSTOMER PROFILE for what this thread is meant to reach, and let both steer \
-any sentence you add so it stays on-message. Prefer fewer, shorter additions; when \
-the snippets connect cleanly on their own, add nothing.
-- Match the snippets' own language and style — their tone, vocabulary, formality, and \
-phrasing — so any words you add are indistinguishable from the snippet text and the \
-whole reply reads in one consistent voice.
-- Write in the founder's voice (see the profile). Keep it concise, like a real \
-LinkedIn message. No greeting or sign-off boilerplate unless a snippet provides it.
-- Do not say \"that resonates\" (or variants like \"this resonates\" / \"really \
-resonates\"); reply to the prospect directly instead of using that filler.
-- Do not use em dashes or en dashes (\u{2014} or \u{2013}) anywhere in the reply, \
-including any inherited from the snippets; replace them with a plain hyphen (-) or \
-reword. Use a hyphen only when a dash is truly unavoidable.
+HOW TO BUILD IT
+- OPEN BY ANSWERING WHAT THEY ACTUALLY SAID, in your own words, before anything else. A \
+reply that skips past their last message to say its own thing has failed, however \
+on-message every line in it is.
+- The SNIPPETS are your material AND your voice. Take the substance from them and keep \
+their wording where it fits; you may trim, merge and reword them to fit the sentence \
+around them. Facts, claims, numbers, links, offers and commitments stay exactly as the \
+snippet states them: reword the sentence, never the fact.
+- Never state a fact, claim, offer, link or commitment that isn't in the SNIPPETS, the \
+PROFILE, or the PRODUCT. Invent no details, numbers, or promises.
+- Never reuse a line you have already sent in this thread, in any wording. Say the next \
+thing instead.
+- Match their message length. A little longer is fine when the answer needs room; a wall \
+of text never is.
+- At most ONE question per message. Never ask a question and make an ask in the same \
+message: pick one.
 
-When you CANNOT do the above, do not write a normal message. Instead output a SINGLE \
-LINE IN ALL CAPS, at most 20 words, saying why — either:
-- the snippets are completely irrelevant to what this conversation is about, or
-- the conversation has pivoted so far that no reply can be built from the snippets.
+PLACEHOLDERS
+A snippet may carry [SQUARE BRACKET] blanks. Fill each from the prospect's name, the \
+conversation, the PROFILE, the PRODUCT, or the CUSTOMER PROFILE (which describes a whole \
+segment, so it can supply [their kind of team] but never [their company]). Never guess. \
+If the detail isn't there, reword the sentence without it or use another snippet. The \
+reply must NEVER contain a literal [ or ].
+
+WHO YOU ARE WRITING TO
+- CUSTOMER PROFILE, when present, is your steering: who they are, what they care about, \
+and the GOAL for this thread. Most of the library won't fit this buyer, and picking the \
+lines that speak to their stated concerns is the larger part of your job. When it's \
+absent, compose from the product and snippets and invent no goal of your own.
+- WHERE THIS THREAD SITS IN YOUR CYCLE, when present, is the nearer target and WINS on \
+scope: work toward the step goal, never past it to the profile goal. If the conversation \
+already satisfies it, write the natural next message instead of re-asking.
+- Snippet STAGE tags (Opener, Warming up, Warm, Engaged, Objection, Calling to meet, \
+Follow-up) say how warm a LINE OF COPY is. They are NOT the cycle stages above; don't \
+match them up by name. Read the thread, prefer lines matching how warm it actually is, \
+and advance about one step at a time.
+- Snippet TOPIC tags say what a line is about. Prefer the topic the thread is already on. \
+This is a preference, NOT a rule: change it when they ask about something else, when \
+you've made the point already, or when the goal needs a step this topic can't take. A \
+blank topic fits anywhere.
+
+THE ASK
+The ask is whatever the GOAL names: a call, a link, an intro. SIGNALS decide when to make \
+it, never a message count.
+- Make it on a green signal: they name a specific problem of their own, ask how it works \
+or to see it, name a tool they're unhappy with, mention teammates or their process, or ask \
+about price or access.
+- Hold back on red: one-word or merely polite replies, answers carrying nothing of their \
+own, or an ask of yours they already deflected. Never ask in the first reply, and never \
+repeat an ask they sidestepped.
+- Past roughly four exchanges with green signals and no ask yet, prefer making it.
+- If no snippet supports the ask, say what you can and leave it for later.
+
+VOICE
+- Write as the founder (see PROFILE), in real LinkedIn message register. No greeting or \
+sign-off boilerplate unless a snippet carries one.
+- Anything you write yourself must be indistinguishable from the snippets in tone, \
+vocabulary and formality.
+- Never front an abstraction with a shell noun or a cleft. Not \"the tricky piece/part/\
+thing is X\", not \"what's tricky is X\", not \"it's X that's tricky\". Put the real \
+subject first: \"alignment is difficult\".
+- Do not say \"that resonates\" (or \"this resonates\" / \"really resonates\").
+- No em dashes or en dashes (\u{2014} or \u{2013}) anywhere, including any inherited from \
+a snippet. Use a plain hyphen (-) or reword.
+
+When the snippets are completely irrelevant to what this conversation is about, or it has \
+pivoted so far that no reply can be built from them, output a SINGLE LINE IN ALL CAPS, at \
+most 20 words, saying why.
 
 Output ONLY the reply text, or the ALL-CAPS explanation. No preamble, quotes, labels, \
 headings, or commentary.";
@@ -1580,11 +1552,11 @@ mod tests {
 
         // Instruction rules survive.
         assert!(rendered.contains("ALL CAPS"));
-        assert!(rendered.contains("short connecting sentences of your own"));
-        assert!(rendered.contains("Match the snippets' own language and style"));
+        assert!(rendered.contains("trim, merge and reword"));
+        assert!(rendered.contains("indistinguishable from the snippets"));
         // Bracketed blanks in snippets are filled from context, never left literal.
         assert!(rendered.contains("PLACEHOLDERS"));
-        assert!(rendered.contains("[SQUARE BRACKETS]"));
+        assert!(rendered.contains("[SQUARE BRACKET]"));
         assert!(rendered.contains("NEVER contain a literal"));
         // The list's own [n] numbering shares that syntax, so it's disowned explicitly
         // — blanks are common in the library now, and a stray "[2]" in a sent message
@@ -1595,12 +1567,12 @@ mod tests {
         assert!(rendered.contains("--- INPUT ---"));
         assert!(rendered.contains("(Opener | Workflow) Intro: We build a CRM"));
         assert!(rendered.contains("(STAGE | TOPIC)"));
-        assert!(rendered.contains("conversation STAGE it fits"));
+        assert!(rendered.contains("Snippet STAGE tags"));
         // Topical continuity is asked for, and explicitly as a preference rather than a
         // rule — the whole point is that it may change subject when the thread moves.
-        assert!(rendered.contains("PREFER snippets on that same topic"));
+        assert!(rendered.contains("Prefer the topic the thread is already on"));
         assert!(rendered.contains("This is a preference, NOT a rule"));
-        assert!(rendered.contains("Change the subject whenever the thread gives you a reason"));
+        assert!(rendered.contains("change it when they ask about something else"));
         assert!(rendered.contains("THEM: what do you do?"));
         assert!(rendered.contains("YOU: hi there"));
         assert!(rendered.contains("replying to: Ada"));
@@ -1637,11 +1609,10 @@ mod tests {
 
         // The instruction makes selection-by-pain and ordering-toward-goal explicit,
         // and keeps the goal from becoming a licence to invent.
-        assert!(rendered.contains("THE CUSTOMER PROFILE IS YOUR STEERING"));
-        assert!(rendered.contains("most of it will not fit this buyer")
-            || rendered.contains("most of it will not fit"));
-        assert!(rendered.contains("ONE step"));
-        assert!(rendered.contains("destination, not a licence"));
+        assert!(rendered.contains("is your steering"));
+        assert!(rendered.contains("won't fit this buyer"));
+        assert!(rendered.contains("one step at a time"));
+        assert!(rendered.contains("no snippet supports the ask"));
     }
 
     /// An unassigned prospect must produce NO customer block at all — not an empty
@@ -1667,8 +1638,8 @@ mod tests {
         );
         assert!(!input.contains("GOAL for this profile"));
         // The instruction still covers the case.
-        assert!(rendered.contains("When NO customer profile block is present"));
-        assert!(rendered.contains("do not invent a goal of your own"));
+        assert!(rendered.contains("When it's absent"));
+        assert!(rendered.contains("invent no goal of your own"));
     }
 
     /// The other half of the steering pair: the customer profile says where the
@@ -1696,11 +1667,10 @@ mod tests {
         assert!(rendered.contains("GOAL OF THIS STEP"));
         assert!(rendered.contains("Get a reply that says whether this is worth their time."));
         // The step goal outranks the profile goal in scope...
-        assert!(rendered.contains("that step goal is the nearer target")
-            || rendered.contains("step goal is the nearer target"));
-        assert!(rendered.contains("do not reach past it"));
+        assert!(rendered.contains("is the nearer target"));
+        assert!(rendered.contains("never past it to the profile goal"));
         // ...and the snippet arc labels must not be confused with cycle stages.
-        assert!(rendered.contains("NOT the founder's cycle stages"));
+        assert!(rendered.contains("NOT the cycle stages"));
         // The profile block still stands alongside it.
         assert!(rendered.contains("GOAL for this profile"));
     }

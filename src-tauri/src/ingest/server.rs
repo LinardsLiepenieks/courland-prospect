@@ -440,29 +440,41 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
+    let conversation: Vec<DraftMessage> = body
+        .messages
+        .iter()
+        .filter(|m| !m.body.trim().is_empty())
+        .map(|m| DraftMessage {
+            incoming: m.direction.trim() == messages::repository::INCOMING,
+            body: m.body.trim().to_string(),
+        })
+        .collect();
+
     // Only content-bearing snippets are worth sending; drop the blank cards the
     // editor leaves behind. Each carries its conversation stage (`category`) so the
     // composer can prefer stage-appropriate lines for where the thread sits.
-    let draft_snippets: Vec<DraftSnippet> = fit_to_budget(
-        snippets
-            .into_iter()
-            .filter(|s| !s.content.trim().is_empty())
-            .map(|s| DraftSnippet {
-                stage: s.category,
-                topic: s.topic,
-                name: s.name,
-                content: s.content,
-            })
-            .collect(),
-    );
+    let usable: Vec<DraftSnippet> = snippets
+        .into_iter()
+        .filter(|s| !s.content.trim().is_empty())
+        .map(|s| DraftSnippet {
+            stage: s.category,
+            topic: s.topic,
+            name: s.name,
+            content: s.content,
+        })
+        .collect();
 
     // Nothing to compose from → don't burn a CLI call. Return the same shape of
     // ALL-CAPS refusal the model would, so the composer treatment is consistent.
     // A customer profile alone isn't material: it says who to write to and toward
     // what, but carries nothing you're allowed to actually say.
+    //
+    // Judged on the UNFILTERED set: a library whose every line has already been
+    // sent in this thread is a well-used library, not an unconfigured app, and
+    // telling the user to go add material would be a lie.
     let has_material = !product.description.trim().is_empty()
         || !profile.who_are_you.trim().is_empty()
-        || !draft_snippets.is_empty();
+        || !usable.is_empty();
     if !has_material {
         // `blocked` marks this as a setup problem rather than a composed reply, so
         // the batch runner can stop and say so once instead of writing this
@@ -476,15 +488,7 @@ async fn draft_reply(State(state): State<ServerState>, Json(body): Json<DraftReq
         .into_response();
     }
 
-    let conversation: Vec<DraftMessage> = body
-        .messages
-        .iter()
-        .filter(|m| !m.body.trim().is_empty())
-        .map(|m| DraftMessage {
-            incoming: m.direction.trim() == messages::repository::INCOMING,
-            body: m.body.trim().to_string(),
-        })
-        .collect();
+    let draft_snippets = fit_to_budget(drop_already_sent(usable, &conversation));
 
     let ctx = DraftContext {
         prospect_name: body.prospect_name.trim(),
@@ -646,6 +650,76 @@ const DRAFT_SNIPPET_BUDGET: usize = 120_000;
 /// so the model still sees openers through closers rather than losing the tail to a
 /// truncation. Trimming is logged: a silently shortened prompt would look like the
 /// model ignoring material the user can plainly see in their library.
+/// Drop snippets the founder has already sent in THIS thread.
+///
+/// Repetition is what makes a thread read as automated, and nothing stopped it: the
+/// composer sees the whole library on every turn and has no memory beyond the
+/// transcript. The instruction now forbids reusing a line, but a rule the model has
+/// to notice is weaker than a line it never sees, so the obvious cases are removed
+/// here and the instruction covers the paraphrases.
+///
+/// Matching is deliberately conservative — normalized containment in one of the
+/// founder's own outgoing messages. Normalization folds case, punctuation and
+/// whitespace, so a line survives being retyped with different spacing or a stray
+/// comma; containment (rather than equality) catches the common case of a snippet
+/// sent as one part of a longer stitched message. Only outgoing messages count: a
+/// prospect quoting your line back at you is not you having said it twice.
+///
+/// Very short snippets are left alone. A line like "Sounds good!" is contained in
+/// half of everything ever written, and dropping every such fragment on a
+/// coincidental substring hit would quietly strip the library's connective lines.
+fn drop_already_sent(snippets: Vec<DraftSnippet>, conversation: &[DraftMessage]) -> Vec<DraftSnippet> {
+    /// Below this many normalized characters, containment is coincidence more often
+    /// than reuse, so the snippet is kept and the instruction handles it.
+    const MIN_MATCH_LEN: usize = 25;
+
+    let sent: Vec<String> = conversation
+        .iter()
+        .filter(|m| !m.incoming)
+        .map(|m| normalize_for_match(&m.body))
+        .collect();
+    if sent.is_empty() {
+        return snippets;
+    }
+
+    let before = snippets.len();
+    let kept: Vec<DraftSnippet> = snippets
+        .into_iter()
+        .filter(|s| {
+            let needle = normalize_for_match(&s.content);
+            needle.len() < MIN_MATCH_LEN || !sent.iter().any(|m| m.contains(&needle))
+        })
+        .collect();
+
+    if kept.len() < before {
+        eprintln!(
+            "ingest: dropped {} snippet(s) already sent in this thread",
+            before - kept.len()
+        );
+    }
+    kept
+}
+
+/// Fold text to a form two renderings of the same sentence agree on: lowercased,
+/// alphanumerics and spaces only, single-spaced. Used only for reuse detection —
+/// never for anything the user or the model sees.
+fn normalize_for_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
 fn fit_to_budget(snippets: Vec<DraftSnippet>) -> Vec<DraftSnippet> {
     let weigh = |s: &DraftSnippet| s.content.len() + s.name.len() + s.stage.len();
     let total: usize = snippets.iter().map(weigh).sum();
@@ -1207,8 +1281,81 @@ async fn create_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_to_budget, parse_healed, DraftSnippet, DRAFT_SNIPPET_BUDGET};
+    use super::{
+        drop_already_sent, fit_to_budget, parse_healed, DraftMessage, DraftSnippet,
+        DRAFT_SNIPPET_BUDGET,
+    };
     use std::collections::HashSet;
+
+    fn line(content: &str) -> DraftSnippet {
+        DraftSnippet {
+            stage: String::new(),
+            topic: String::new(),
+            name: String::new(),
+            content: content.into(),
+        }
+    }
+
+    fn said(incoming: bool, body: &str) -> DraftMessage {
+        DraftMessage { incoming, body: body.into() }
+    }
+
+    /// The whole point: a line already stitched into one of your own messages is
+    /// gone from the pool, even though the surrounding message is much longer.
+    #[test]
+    fn a_snippet_already_sent_in_this_thread_is_dropped() {
+        let sent = "Great to connect! design and dev roles are converging and that is a \
+                    road to better products.";
+        let kept = drop_already_sent(
+            vec![
+                line("design and dev roles are converging"),
+                line("we have fully cut out figma and build components in code instead"),
+            ],
+            &[said(false, sent)],
+        );
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].content.starts_with("we have fully cut"));
+    }
+
+    /// Normalization has to survive the cosmetic differences between how a line is
+    /// stored and how it came back off the page.
+    #[test]
+    fn matching_ignores_case_punctuation_and_spacing() {
+        let kept = drop_already_sent(
+            vec![line("Design and dev roles are converging!")],
+            &[said(false, "yeah   design  and dev, roles are converging")],
+        );
+        assert!(kept.is_empty());
+    }
+
+    /// A prospect echoing your line back is not you repeating yourself, and the
+    /// snippet must stay available.
+    #[test]
+    fn an_incoming_echo_does_not_retire_a_snippet() {
+        let kept = drop_already_sent(
+            vec![line("design and dev roles are converging")],
+            &[said(true, "you said design and dev roles are converging - agreed")],
+        );
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// Short connective lines collide with everything; dropping them on a
+    /// coincidental substring hit would strip the library of its glue.
+    #[test]
+    fn a_short_line_is_never_dropped_on_a_coincidental_match() {
+        let kept = drop_already_sent(
+            vec![line("Sounds good!")],
+            &[said(false, "sounds good, i will send it over tomorrow morning")],
+        );
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// An empty or all-incoming thread leaves the library exactly as it was.
+    #[test]
+    fn nothing_is_dropped_before_you_have_sent_anything() {
+        let library = vec![line("design and dev roles are converging")];
+        assert_eq!(drop_already_sent(library, &[]).len(), 1);
+    }
 
     fn snippet(name: &str, chars: usize) -> DraftSnippet {
         DraftSnippet {
