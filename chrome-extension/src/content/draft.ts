@@ -24,8 +24,10 @@ import {
   findSendButton,
   identify,
   isRowActive,
+  messageStreamFingerprint,
   scrapeMessages,
   selectedRowIndex,
+  threadRowName,
   topThreadRows,
   writeComposer,
 } from "./linkedin";
@@ -209,8 +211,16 @@ const OPEN_PHASE_MS = 20_000;
 const MAX_CONSECUTIVE_UNCONFIRMED = 3;
 /** How often to poll while confirming the target conversation opened. */
 const NAV_POLL_MS = 150;
-/** Let the opened thread settle (its DOM swap in) before scraping it. */
-const SETTLE_MS = 300;
+/** Gap between the two message-stream samples that prove the pane has stopped
+ *  changing. A fixed post-navigation sleep can't do this job: it either fires
+ *  while LinkedIn still has the PREVIOUS thread's rows mounted (capturing a
+ *  stranger's conversation under this person's profile url) or wastes time on a
+ *  thread that was ready immediately. */
+const STABLE_POLL_MS = 200;
+/** How long to wait for the stream to stop changing before treating the open as
+ *  unconfirmed. Bounded well under `OPEN_PHASE_MS` so a thread that never settles
+ *  is skipped rather than eating the whole batch's budget. */
+const STABLE_TIMEOUT_MS = 4_000;
 /** Re-fire the row activation at most this often. LinkedIn attaches the list's
  *  click handlers a beat after the rows first render, so a single early activation
  *  can no-op — keep nudging until the target is the open conversation. */
@@ -274,6 +284,12 @@ export async function runCycle(
   // the active-row / thread-row markers having rotated, not lag. Retry once, then
   // give up if it's still broken.
   let healedThreadSelectors = false;
+  // The thread url we last captured. The next index must land somewhere else
+  // before it counts as open — that's what stops a not-yet-navigated pane from
+  // being scraped as the new person. Null for the first index: the batch starts
+  // on the already-open conversation, so there is no stale thread to confuse it
+  // with, and requiring a change there would never resolve.
+  let prevThreadUrl: string | null = null;
   const pending: Promise<void>[] = [];
   const tick = (done: boolean): void => report({ ready, failed, done, blocked });
 
@@ -282,7 +298,7 @@ export async function runCycle(
     // of the batch can only repeat it. Stop opening conversations.
     if (blocked) break;
     const index = start + i;
-    const outcome = await openConversationAt(index, Date.now() + OPEN_PHASE_MS);
+    const outcome = await openConversationAt(index, prevThreadUrl, Date.now() + OPEN_PHASE_MS);
     // The row never rendered even after scrolling — the inbox has fewer
     // conversations than requested, so we're genuinely at the end. Stop.
     if (outcome === "absent") break;
@@ -320,6 +336,22 @@ export async function runCycle(
       tick(false);
       continue;
     }
+
+    // Last gate: the person the HEADER names must be the person the ROW we
+    // activated names. The settle check proves the stream stopped moving, but a
+    // pane can settle showing the previous conversation entirely — and then the
+    // scrape is coherent, plausible, and about the wrong human. Compared on the
+    // first name only, case-folded, so "Hendrick Joseph" still matches a row
+    // rendering "Hendrick J." while "Jay" against "Hendrick" is caught. Skipped
+    // when either side is unreadable rather than failing the conversation on a
+    // selector we couldn't resolve.
+    const rowName = topThreadRows(index + 1)[index];
+    if (rowName && !namesAgree(threadRowName(rowName), thread.name)) {
+      failed += 1;
+      tick(false);
+      continue;
+    }
+    prevThreadUrl = url;
 
     // Snapshot the thread into plain data now, while it's the open conversation —
     // the async generation below must not read the DOM after we've moved on.
@@ -424,7 +456,11 @@ async function resolveCustomerForThread(
  */
 type OpenOutcome = "opened" | "absent" | "unconfirmed";
 
-async function openConversationAt(index: number, deadline: number): Promise<OpenOutcome> {
+async function openConversationAt(
+  index: number,
+  prevUrl: string | null,
+  deadline: number,
+): Promise<OpenOutcome> {
   let lastActivate = 0;
   // Whether the target row ever rendered — lets us tell "end of the list" (never
   // rendered) apart from "rendered but wouldn't confirm as open" at the deadline.
@@ -436,9 +472,14 @@ async function openConversationAt(index: number, deadline: number): Promise<Open
       const row = rows[index];
       // Proceed only once THIS row is the open conversation (exactly one is active
       // at a time) and a thread URL is present.
-      if (isRowActive(row) && currentThreadUrl()) {
-        await delay(SETTLE_MS);
-        return "opened";
+      // The row is active AND the router has actually moved off the thread we
+      // were on. Without the second half, a row that goes active before the SPA
+      // navigates reads as open while the pane still shows the previous person.
+      const url = currentThreadUrl();
+      if (isRowActive(row) && url && url !== prevUrl) {
+        if (await streamSettled(url)) return "opened";
+        // Never settled: the pane is still churning, so anything scraped now is
+        // a mix. Fall through and let the deadline decide.
       }
       // (Re)activate periodically until it takes — the list's click handlers
       // hydrate slightly after the rows render, so the first nudge can no-op.
@@ -456,6 +497,45 @@ async function openConversationAt(index: number, deadline: number): Promise<Open
   // Deadline hit: absent if the row never rendered (end of the list), else it
   // rendered but wouldn't confirm as open (transient lag or a changed marker).
   return everRendered ? "unconfirmed" : "absent";
+}
+
+/**
+ * Whether two renderings of a person's name plausibly refer to the same person.
+ *
+ * Lenient by design: the sidebar and the thread header abbreviate differently
+ * ("Hendrick Joseph" vs "Hendrick J."), and rejecting a real match costs the user
+ * a skipped conversation. Only the first name is compared, and an unreadable side
+ * (either string empty) agrees with anything — a rotated selector must not fail
+ * every thread in the batch. It still catches the case this exists for, where the
+ * pane settled on an entirely different conversation.
+ */
+function namesAgree(rowName: string, headerName: string): boolean {
+  const first = (s: string): string => s.trim().toLowerCase().split(/\s+/)[0] ?? "";
+  const a = first(rowName);
+  const b = first(headerName);
+  return !a || !b || a === b;
+}
+
+/**
+ * Wait until the message stream stops changing while staying on `url`.
+ *
+ * Two consecutive identical fingerprints mean LinkedIn has finished swapping the
+ * pane, so what's mounted is this thread and only this thread. A URL change part
+ * way through means the router moved again (the user clicked, or a queued
+ * navigation landed) and whatever we were measuring is void — fail rather than
+ * scrape a thread we didn't ask for.
+ */
+async function streamSettled(url: string): Promise<boolean> {
+  const deadline = Date.now() + STABLE_TIMEOUT_MS;
+  let last = messageStreamFingerprint();
+  while (Date.now() < deadline) {
+    await delay(STABLE_POLL_MS);
+    if (currentThreadUrl() !== url) return false;
+    const now = messageStreamFingerprint();
+    if (now === last) return true;
+    last = now;
+  }
+  return false;
 }
 
 // ── Review tab: the fill ─────────────────────────────────────────────────────

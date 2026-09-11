@@ -71,6 +71,9 @@ export const DEFAULTS = {
   inboxFilterRow: '[class*="msg-conversations-container__title-row"]',
   /** A conversation row's clickable element in the thread list. */
   threadRow: '[class*="msg-conversation-listitem__link"]',
+  /** The participant name rendered inside a thread-list row — cross-checked against
+   *  the open thread's header so a half-swapped pane can't be captured. */
+  threadRowName: '[class*="participant-names"], [class*="listitem__participant"]',
   /** Class token marking the conversation row currently open in the reading pane. */
   activeRowToken: "convo-item-link--active",
 
@@ -136,6 +139,8 @@ export const DESCRIPTIONS: Record<SelectorKey, string> = {
   inboxTopBarFallback: "the messaging inbox top bar (fallback)",
   inboxFilterRow: "the messaging inbox filter row (Inbox / Jobs / Unread tabs)",
   threadRow: "a clickable conversation row in the messaging thread list",
+  threadRowName:
+    "the element inside a thread-list row holding the other participant's display name",
   activeRowToken:
     "the CSS class (bare token, no dot) marking the thread-list row currently open",
   postContainer:

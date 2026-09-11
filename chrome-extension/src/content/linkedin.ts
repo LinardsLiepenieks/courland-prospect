@@ -320,6 +320,32 @@ export function isRowActive(row: HTMLElement): boolean {
   return row.className.includes(selStr("activeRowToken"));
 }
 
+/** The display name rendered in a thread-list row, or `""` when it can't be read.
+ *  Cross-checked against the open thread's header name before capturing: the two
+ *  disagreeing means the reading pane is mid-swap and shows a different person
+ *  than the row we activated. */
+export function threadRowName(row: HTMLElement): string {
+  const el = row.querySelector<HTMLElement>(selStr("threadRowName"));
+  return (el?.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** A cheap signature of the message stream currently in the document: how many
+ *  rows there are, plus the first and last row's event urn.
+ *
+ * Deliberately document-wide rather than scoped to one conversation. During
+ * LinkedIn's pane swap the outgoing thread's rows and the incoming thread's rows
+ * are BOTH mounted, and that transient state is exactly what the caller is waiting
+ * out — so the fingerprint has to be able to see it. Two consecutive reads being
+ * equal means the swap has finished. */
+export function messageStreamFingerprint(): string {
+  const items = document.querySelectorAll<HTMLElement>(selStr("messageItem"));
+  const urn = (el: Element | undefined): string =>
+    el?.getAttribute("data-event-urn") ??
+    el?.querySelector("[data-event-urn]")?.getAttribute("data-event-urn") ??
+    "";
+  return `${items.length}|${urn(items[0])}|${urn(items[items.length - 1])}`;
+}
+
 /** The list position of the conversation currently open in the reading pane —
  *  the row marked `…convo-item-link--active`. `0` when none is active (a fresh
  *  inbox before any thread is opened), so a batch started there counts from the
@@ -930,6 +956,16 @@ function messageTimestamp(item: Element): string | null {
  * Only messages with body text are returned (system rows / bare attachments are
  * skipped). Virtualized-off-screen messages simply aren't seen — they're picked
  * up on the next scrape when scrolled into view.
+ *
+ * Rows belonging to a DIFFERENT conversation are dropped. LinkedIn's SPA leaves
+ * the previous thread's rows mounted for a beat while it swaps panes, and a scrape
+ * that lands in that window used to post them under the newly-opened person's
+ * profile url — which is how one prospect ends up holding a stranger's entire
+ * thread. A counterparty row (`--other`) whose visible sender is someone other than
+ * `partnerUrl` cannot belong to this 1:1 thread, so it is foreign by construction.
+ * That needs no knowledge of the signed-in user's own profile, and it is a content
+ * check rather than a timing one — the caller's settle logic covers the rest (your
+ * OWN messages from a foreign thread carry no distinguishing sender).
  */
 export function scrapeMessages(scope: Element, partnerUrl: string): CapturedMessage[] {
   const out: CapturedMessage[] = [];
@@ -937,21 +973,52 @@ export function scrapeMessages(scope: Element, partnerUrl: string): CapturedMess
   const bodySel = selStr("messageBody");
   for (const item of Array.from(scope.querySelectorAll<HTMLElement>(selStr("messageItem")))) {
     const sender = senderUrl(item);
-    const isIncoming =
-      item.classList.contains(otherModifier) || (sender != null && sender === partnerUrl);
+    const fromOther = item.classList.contains(otherModifier);
+    // A counterparty row attributed to someone who isn't the partner belongs to
+    // another conversation still sitting in the DOM. Never capture it.
+    if (fromOther && sender != null && sender !== partnerUrl) continue;
+    const isIncoming = fromOther || (sender != null && sender === partnerUrl);
     const direction: MessageDirection = isIncoming ? "incoming" : "outgoing";
 
-    const body = (item.querySelector(bodySel)?.textContent ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
+    const bodyEl = item.querySelector<HTMLElement>(bodySel);
+    const body = readMessageBody(bodyEl);
     if (!body) continue;
 
+    // The fallback key hashes the LEGACY single-line normalization, not `body`.
+    // `li_key` is the message's identity under `UNIQUE(prospect_id, li_key)`, so
+    // hashing the newly line-preserving text would re-key every already-stored
+    // row that lacks a `data-event-urn` and insert it a second time.
+    const legacy = (bodyEl?.textContent ?? "").replace(/\s+/g, " ").trim();
     const sent_at = messageTimestamp(item);
     const li_key =
       item.getAttribute("data-event-urn") ??
       item.querySelector("[data-event-urn]")?.getAttribute("data-event-urn") ??
-      hashKey(`${body}|${sent_at ?? ""}`);
+      hashKey(`${legacy}|${sent_at ?? ""}`);
     out.push({ li_key, body, sent_at, direction });
   }
   return out;
+}
+
+/**
+ * One message body as text, WITH its line structure intact.
+ *
+ * `textContent` walks straight through the block elements LinkedIn renders a
+ * multi-paragraph message with, so it returns one run-on string — and the old
+ * `\s+ → " "` normalization then flattened whatever survived. Every message ever
+ * captured is stored that way, which means the drafter reads the founder's own
+ * writing as a wall with no paragraph structure to imitate.
+ *
+ * `innerText` is the one API that reflects rendered line breaks, so it's preferred
+ * and `textContent` stays as the fallback for a detached or unrendered node. Runs
+ * of blank lines collapse to one, and horizontal whitespace collapses per line.
+ */
+function readMessageBody(el: HTMLElement | null): string {
+  if (!el) return "";
+  const raw = el.innerText || el.textContent || "";
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
